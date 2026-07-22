@@ -1,0 +1,46 @@
+[tool.poetry]
+name = "winthrop-ocr"
+version = "0.1.0"
+description = "OCR library: render PDF pages and extract text with per-page confidence via Mistral OCR"
+authors = ["Winthrop Intelligence"]
+readme = "README.md"
+packages = [{ include = "ocr_engine" }]
+
+[tool.poetry.dependencies]
+# Floor matches winad_scrapers (CI and prod run 3.11); ceiling tracks what CI tests.
+python = ">=3.11,<3.13"
+# Range spans consumers' pins (winad_scrapers is on Pillow 12.x).
+Pillow = ">=11.0,<13"
+# Core, not an extra: the only built-in engine is Mistral, so a bare install
+# without the SDK would fail every call at runtime.
+mistralai = ">=2,<3"
+
+[tool.poetry.extras]
+# Historical alias so `extras = ["mistral"]` install lines keep working.
+mistral = []
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.5"
+pytest-cov = "^6.1.1"
+pylint = "^3.2.0"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pylint.main]
+ignore-paths = ["tests"]
+disable = [
+  "missing-module-docstring",
+  "missing-class-docstring",
+  "missing-function-docstring",
+  "too-few-public-methods",
+  "too-many-instance-attributes",
+  "too-many-arguments",
+  "too-many-positional-arguments",
+  "too-many-return-statements",
+  "too-many-locals",
+  "duplicate-code",
+  "broad-exception-caught",
+]
+max-line-length = 100
