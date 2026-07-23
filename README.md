@@ -9,7 +9,7 @@ service, no queue, and no polling.
 
 ```toml
 # pyproject.toml
-winthrop-ocr = {git = "https://github.com/winthrop-intelligence/winthrop-ocr.git", tag = "v0.1.0"}
+winthrop-ocr = {git = "https://github.com/winthrop-intelligence/winthrop-ocr.git", tag = "v0.2.0"}
 ```
 
 System requirements:
@@ -91,6 +91,7 @@ for provenance.
 ```
 ocr_engine/
 ├── document.py    # ocr_document() — the entry point
+├── review.py      # per-page review flags (signature / handwriting)
 ├── runner.py      # run_page / OcrDocumentResult
 ├── rendering.py   # pdftoppm rendering, page counting, hashing
 ├── policy.py      # profiles + validation

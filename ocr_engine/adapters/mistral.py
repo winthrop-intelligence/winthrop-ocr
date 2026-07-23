@@ -247,7 +247,7 @@ def _serialize_page_signals(page: Any) -> dict[str, Any]:
                 if dimensions is not None
                 else None
             ),
-            "blocks": [_serialize_block(block) for block in blocks[:MAX_SERIALIZED_BLOCKS]],
+            "blocks": [_serialize_block_safe(block) for block in blocks[:MAX_SERIALIZED_BLOCKS]],
             "images": [
                 {"id": getattr(image, "id", None), "bbox": _bbox(image)}
                 for image in images[:MAX_SERIALIZED_IMAGES]
@@ -255,9 +255,21 @@ def _serialize_page_signals(page: Any) -> dict[str, Any]:
         }
         if len(blocks) > MAX_SERIALIZED_BLOCKS:
             signals["blocks_truncated"] = True
+        if len(images) > MAX_SERIALIZED_IMAGES:
+            signals["images_truncated"] = True
         return signals
     except Exception as exc:
         return {"serialization_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _serialize_block_safe(block: Any) -> dict[str, Any]:
+    """One block, or a marker entry — one bad block must not erase the rest
+    (a poisoned signals dict would silently hide real signature blocks)."""
+
+    try:
+        return _serialize_block(block)
+    except Exception as exc:
+        return {"type": "SERIALIZATION_ERROR", "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _serialize_block(block: Any) -> dict[str, Any]:

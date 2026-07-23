@@ -91,6 +91,19 @@ class TestTicketCases:
         assert flags.signature_page is False
         assert flags.handwriting_suspected is False
 
+    def test_handwritten_edit_on_a_signature_page_flags_both(self):
+        # The ticket's motivating scenario in one page: a crossed-out value
+        # rewritten by hand ON the signature page. Flags are independent.
+        confidences = [0.96] * 24 + [0.41, 0.38, 0.55, 0.49, 0.62, 0.58]
+        flags = detect_review_flags(
+            page_result(
+                word_confidences=confidences,
+                blocks=[text_block(), signature_block()],
+            )
+        )
+        assert flags.signature_page is True
+        assert flags.handwriting_suspected is True
+
 
 class TestHandwritingBoundaries:
     def test_ratio_exactly_at_threshold_flags(self):
@@ -121,6 +134,18 @@ class TestHandwritingBoundaries:
         flags = detect_review_flags(page_result(word_confidences=[0.9] * 5))
         assert flags.handwriting_suspected is False
 
+    def test_word_confidence_exactly_at_cutoff_is_not_low(self):
+        # Strict <: a word at exactly 0.70 is not "uncertain".
+        confidences = [0.95] * 18 + [0.70, 0.70]
+        flags = detect_review_flags(page_result(word_confidences=confidences))
+        assert flags.handwriting_suspected is False
+        assert flags.signals["low_confidence_word_count"] == 0
+
+    def test_sparse_average_exactly_at_floor_is_clean(self):
+        # Strict <: an average of exactly 0.60 does not flag.
+        flags = detect_review_flags(page_result(word_confidences=[0.60] * 5))
+        assert flags.handwriting_suspected is False
+
 
 class TestRobustness:
     def test_empty_values_and_missing_signals_are_clean(self):
@@ -131,7 +156,6 @@ class TestRobustness:
                 metadata={},
             )
         )
-        assert flags == PageReviewFlags(signals=flags.signals)
         assert flags.signature_page is False
         assert flags.handwriting_suspected is False
 

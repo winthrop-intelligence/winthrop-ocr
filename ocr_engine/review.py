@@ -38,7 +38,11 @@ SPARSE_PAGE_AVERAGE_CONFIDENCE_FLOOR = 0.60
 
 @dataclass(frozen=True)
 class PageReviewFlags:
-    """Non-blocking review flags for one page, with their evidence."""
+    """Non-blocking review flags for one page, with their evidence.
+
+    Frozen for value semantics, but ``signals`` is a plain dict — treat the
+    whole object as read-only; do not rely on hashing it.
+    """
 
     signature_page: bool = False
     handwriting_suspected: bool = False

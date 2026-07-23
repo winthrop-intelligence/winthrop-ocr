@@ -231,6 +231,31 @@ class TestPageSignalsSerialization:
         signals = _serialize_page_signals(Hostile())
         assert "serialization_error" in signals
 
+    def test_one_bad_block_does_not_erase_the_rest(self):
+        # A poisoned block must not hide the signature block next to it.
+        page = SimpleNamespace(
+            dimensions=None,
+            blocks=[
+                SimpleNamespace(type="text", content=12345),  # len(int) raises
+                SimpleNamespace(type="signature", content="J. Smith"),
+            ],
+            images=[],
+        )
+        blocks = _serialize_page_signals(page)["blocks"]
+        assert blocks[0]["type"] == "SERIALIZATION_ERROR"
+        assert blocks[1]["type"] == "signature"
+        assert blocks[1]["content"] == "J. Smith"
+
+    def test_image_truncation_is_flagged(self):
+        page = SimpleNamespace(
+            dimensions=None,
+            blocks=[],
+            images=[SimpleNamespace(id=f"img-{n}") for n in range(60)],
+        )
+        signals = _serialize_page_signals(page)
+        assert len(signals["images"]) == 50
+        assert signals["images_truncated"] is True
+
 
 class TestPageConfidence:
     def test_dict_payload_scales_to_percent(self):
