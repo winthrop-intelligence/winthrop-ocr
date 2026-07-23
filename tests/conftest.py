@@ -46,8 +46,26 @@ def page_input_for(image_path: Path, page_number: int = 1) -> PageInput:
     )
 
 
+def word_confidence_values(word_confidences: list[float]) -> dict:
+    """Build the real Mistral values shape from a list of word confidences."""
+
+    return {
+        "average_page_confidence_score": sum(word_confidences) / len(word_confidences),
+        "minimum_page_confidence_score": min(word_confidences),
+        "word_confidence_scores": [
+            {"text": f"w{index}", "confidence": value, "start_index": index}
+            for index, value in enumerate(word_confidences)
+        ],
+    }
+
+
 class FakeEngine:
-    """Deterministic engine for runner tests; records the pages it saw."""
+    """Deterministic engine for runner tests; records the pages it saw.
+
+    ``word_confidences`` / ``page_signals`` script the review-flag inputs;
+    ``per_page`` overrides any of text/word_confidences/page_signals for
+    specific page numbers.
+    """
 
     def __init__(
         self,
@@ -56,11 +74,17 @@ class FakeEngine:
         confidence: float | None = 90.0,
         text: str = "recognized text " * 5,
         status: str = "success",
+        word_confidences: list[float] | None = None,
+        page_signals: dict | None = None,
+        per_page: dict[int, dict] | None = None,
     ) -> None:
         self.name = name
         self.confidence = confidence
         self.text = text
         self.status = status
+        self.word_confidences = word_confidences
+        self.page_signals = page_signals
+        self.per_page = per_page or {}
         self.calls: list[int] = []
 
     @classmethod
@@ -83,6 +107,10 @@ class FakeEngine:
                 error_type=self.status,
                 error_message=f"{self.name} simulated {self.status}",
             )
+        overrides = self.per_page.get(page.page_number, {})
+        word_confidences = overrides.get("word_confidences", self.word_confidences)
+        page_signals = overrides.get("page_signals", self.page_signals)
+        metadata = {"page_signals": page_signals} if page_signals is not None else {}
         return OCRResult(
             document_id=page.document_id,
             page_number=page.page_number,
@@ -90,10 +118,19 @@ class FakeEngine:
             engine_version="fake",
             backend="fake",
             status="success",
-            text=self.text,
+            text=overrides.get("text", self.text),
             elapsed_ms=max(1, round((time.perf_counter() - started) * 1000)),
             confidence=self.confidence,
             # Mirrors the Mistral adapter: OCRResult.confidence is 0-100,
             # while the raw provider payload in confidence_scores is 0-1.
-            confidence_scores={"granularity": "word", "scale": "0-1", "values": []},
+            confidence_scores={
+                "granularity": "word",
+                "scale": "0-1",
+                "values": (
+                    word_confidence_values(word_confidences)
+                    if word_confidences
+                    else []
+                ),
+            },
+            metadata=metadata,
         )

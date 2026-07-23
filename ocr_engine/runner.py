@@ -8,12 +8,13 @@ and strict aggregation on top of it.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ocr_engine.adapters.base import OCREngine
 from ocr_engine.models import OCRResult, PageInput
 from ocr_engine.policy import OcrPolicy
+from ocr_engine.review import PageReviewFlags, detect_review_flags
 
 
 @dataclass
@@ -22,6 +23,9 @@ class PageOutcome:
 
     page_number: int
     selected: OCRResult
+    # Non-blocking human-review flags (signature page / suspected
+    # handwriting), computed from the selected result's signals.
+    review: PageReviewFlags = field(default_factory=PageReviewFlags)
 
     @property
     def confidence(self) -> float | None:
@@ -84,6 +88,12 @@ class OcrDocumentResult:
             "pages_failed": sum(
                 1 for outcome in self.pages if outcome.selected.status != "success"
             ),
+            "signature_pages": sum(
+                1 for outcome in self.pages if outcome.review.signature_page
+            ),
+            "handwriting_pages": sum(
+                1 for outcome in self.pages if outcome.review.handwriting_suspected
+            ),
             "min_confidence": min(confidences) if confidences else None,
             "mean_confidence": (
                 sum(confidences) / len(confidences) if confidences else None
@@ -101,4 +111,9 @@ def run_page(
     """OCR one rendered page through the configured engine."""
 
     result = engines[policy.engine].extract(page)
-    return PageOutcome(page_number=page.page_number, selected=result)
+    review = (
+        detect_review_flags(result)
+        if result.status == "success"
+        else PageReviewFlags()
+    )
+    return PageOutcome(page_number=page.page_number, selected=result, review=review)

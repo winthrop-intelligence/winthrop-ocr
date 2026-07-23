@@ -113,6 +113,36 @@ class TestSuccess:
         result = ocr_document(pdf, max_workers=16)
         assert len(result.pages) == 1
 
+    def test_review_flags_flow_through_per_page(self, tmp_path, monkeypatch):
+        """Clean, signature, and handwritten pages each carry their flags."""
+        engine = FakeEngine(
+            "mistral",
+            word_confidences=[0.95] * 40,  # default: clean printed page
+            per_page={
+                2: {
+                    "page_signals": {
+                        "dimensions": None,
+                        "blocks": [
+                            {"type": "signature", "bbox": None, "content": "J. Smith"}
+                        ],
+                        "images": [],
+                    }
+                },
+                3: {"word_confidences": [0.95] * 24 + [0.4] * 6},
+            },
+        )
+        monkeypatch.setattr(document, "engine_registry", lambda: {"mistral": engine})
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=3)
+        result = ocr_document(pdf, max_workers=3)
+
+        by_page = {outcome.page_number: outcome.review for outcome in result.pages}
+        assert not by_page[1].signature_page and not by_page[1].handwriting_suspected
+        assert by_page[2].signature_page and not by_page[2].handwriting_suspected
+        assert by_page[3].handwriting_suspected and not by_page[3].signature_page
+        summary = result.summary()
+        assert summary["signature_pages"] == 1
+        assert summary["handwriting_pages"] == 1
+
 
 class TestStrictFailures:
     def test_any_failed_page_raises_naming_the_pages(self, tmp_path, monkeypatch):
