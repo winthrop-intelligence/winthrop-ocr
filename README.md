@@ -9,7 +9,7 @@ service, no queue, and no polling.
 
 ```toml
 # pyproject.toml
-winthrop-ocr = {git = "https://github.com/winthrop-intelligence/winthrop-ocr.git", tag = "v0.1.0"}
+winthrop-ocr = {git = "https://github.com/winthrop-intelligence/winthrop-ocr.git", tag = "v0.2.0"}
 ```
 
 System requirements:
@@ -55,6 +55,24 @@ failure) after queued pages are cancelled and in-flight pages drain.
 `confidence` values on results are on a **0–100** scale (the raw provider
 payload inside `confidence_scores` keeps Mistral's native 0–1 values).
 
+## Review flags (v0.2.0)
+
+Every successful page carries non-blocking human-review flags:
+
+```python
+for page in result.pages:
+    page.review.signature_page          # Mistral's native signature-block classifier
+    page.review.handwriting_suspected   # broad heuristic over word confidences
+    page.review.signals                 # the evidence (counts, ratios, thresholds)
+result.summary()["signature_pages"], result.summary()["handwriting_pages"]
+```
+
+Flags never change the OCR text or fail a page — detection errors degrade
+to clean flags with a `detector_error` note. Handwriting thresholds are
+module constants in `ocr_engine/review.py`, deliberately broad first
+(tune with real flagged pages later). Reporting policy (Sentry, manifests)
+belongs to consumers.
+
 The library never touches your storage: fetching the source file and
 persisting the text are the caller's job.
 
@@ -73,6 +91,7 @@ for provenance.
 ```
 ocr_engine/
 ├── document.py    # ocr_document() — the entry point
+├── review.py      # per-page review flags (signature / handwriting)
 ├── runner.py      # run_page / OcrDocumentResult
 ├── rendering.py   # pdftoppm rendering, page counting, hashing
 ├── policy.py      # profiles + validation

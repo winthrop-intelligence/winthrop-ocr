@@ -29,6 +29,10 @@ class TestRunPage:
         assert outcome.selected.status == "rate_limited"
         assert outcome.selected.text == ""
         assert outcome.trail()[0]["status"] == "rate_limited"
+        # Detection is skipped for failed pages: default clean flags.
+        assert outcome.review.signature_page is False
+        assert outcome.review.handwriting_suspected is False
+        assert outcome.review.signals == {}
 
 
 class TestOcrDocumentResult:

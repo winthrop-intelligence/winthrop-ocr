@@ -29,6 +29,11 @@ MISTRAL_RATE_LIMIT_DELAYS_SECONDS = (5, 15)
 # abort can be forced to wait for in-flight pages to drain.
 MISTRAL_ATTEMPT_TIMEOUT_MS = 120_000
 
+# Bounds for the preserved per-page layout signals (review-flag inputs).
+MAX_SERIALIZED_BLOCKS = 300
+MAX_SERIALIZED_IMAGES = 50
+SIGNATURE_CONTENT_MAX_CHARS = 200
+
 
 class MistralEngine(OCREngine):
     """Call Mistral OCR with the same rendered image used by local engines."""
@@ -105,6 +110,7 @@ class MistralEngine(OCREngine):
             },
             metadata={
                 "transport_retries": transport_retries,
+                "page_signals": _serialize_page_signals(response_page),
             },
         )
 
@@ -213,6 +219,87 @@ def _serialize_confidence_scores(page: Any) -> Any:
     if hasattr(scores, "model_dump"):
         return scores.model_dump(mode="json")
     return scores
+
+
+def _serialize_page_signals(page: Any) -> dict[str, Any]:
+    """Preserve the page's layout signals for review-flag detection.
+
+    Bounded and content-light: block text is reduced to a length except for
+    signature blocks, whose transcribed name is the signal. Never raises —
+    the OCRResult carrying this is built outside extract()'s try block, so a
+    serializer error here must degrade, not doom the page.
+    """
+
+    try:
+        blocks = getattr(page, "blocks", None)
+        blocks = blocks if isinstance(blocks, list) else []
+        images = getattr(page, "images", None)
+        images = images if isinstance(images, list) else []
+        dimensions = getattr(page, "dimensions", None)
+
+        signals: dict[str, Any] = {
+            "dimensions": (
+                {
+                    "dpi": getattr(dimensions, "dpi", None),
+                    "height": getattr(dimensions, "height", None),
+                    "width": getattr(dimensions, "width", None),
+                }
+                if dimensions is not None
+                else None
+            ),
+            "blocks": [_serialize_block_safe(block) for block in blocks[:MAX_SERIALIZED_BLOCKS]],
+            "images": [
+                {"id": getattr(image, "id", None), "bbox": _bbox(image)}
+                for image in images[:MAX_SERIALIZED_IMAGES]
+            ],
+        }
+        if len(blocks) > MAX_SERIALIZED_BLOCKS:
+            signals["blocks_truncated"] = True
+        if len(images) > MAX_SERIALIZED_IMAGES:
+            signals["images_truncated"] = True
+        return signals
+    except Exception as exc:
+        return {"serialization_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _serialize_block_safe(block: Any) -> dict[str, Any]:
+    """One block, or a marker entry — one bad block must not erase the rest
+    (a poisoned signals dict would silently hide real signature blocks)."""
+
+    try:
+        return _serialize_block(block)
+    except Exception as exc:
+        return {"type": "SERIALIZATION_ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _serialize_block(block: Any) -> dict[str, Any]:
+    """One block's type, position, and (for signatures) transcribed content."""
+
+    block_type = getattr(block, "type", None) or "UNKNOWN"
+    content = getattr(block, "content", "") or ""
+    serialized: dict[str, Any] = {
+        "type": block_type,
+        "bbox": _bbox(block),
+        "content_chars": len(content),
+    }
+    if block_type == "signature":
+        # The transcribed signer name (or "" when illegible) is the signal.
+        serialized["content"] = content[:SIGNATURE_CONTENT_MAX_CHARS]
+    return serialized
+
+
+def _bbox(item: Any) -> list | None:
+    """The item's bounding box, or None when any coordinate is absent."""
+
+    coordinates = [
+        getattr(item, "top_left_x", None),
+        getattr(item, "top_left_y", None),
+        getattr(item, "bottom_right_x", None),
+        getattr(item, "bottom_right_y", None),
+    ]
+    if any(value is None for value in coordinates):
+        return None
+    return coordinates
 
 
 def _mistral_error_status(error: Exception) -> str:

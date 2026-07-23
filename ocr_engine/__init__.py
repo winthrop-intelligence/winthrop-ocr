@@ -15,6 +15,7 @@ import logging
 from ocr_engine.document import OcrDocumentError, ocr_document
 from ocr_engine.models import OCRResult
 from ocr_engine.policy import POLICY_VERSION, OcrPolicy, resolve_policy
+from ocr_engine.review import PageReviewFlags, detect_review_flags
 from ocr_engine.runner import OcrDocumentResult, PageOutcome
 
 __all__ = [
@@ -24,6 +25,8 @@ __all__ = [
     "OcrPolicy",
     "POLICY_VERSION",
     "PageOutcome",
+    "PageReviewFlags",
+    "detect_review_flags",
     "ocr_document",
     "resolve_policy",
 ]

@@ -9,11 +9,13 @@ import pytest
 from ocr_engine.adapters import mistral as mistral_module
 from ocr_engine.adapters.mistral import (
     MISTRAL_ATTEMPT_TIMEOUT_MS,
+    SIGNATURE_CONTENT_MAX_CHARS,
     MistralEngine,
     _is_retryable_mistral_error,
     _mistral_error_status,
     _page_confidence,
     _process_ocr_with_retries,
+    _serialize_page_signals,
 )
 from ocr_engine.adapters.registry import engine_registry
 
@@ -156,6 +158,103 @@ class TestImageDataUrl:
         image = tmp_path / "page.tif"
         image.write_bytes(b"data")
         assert base.image_data_url(image).startswith("data:image/tiff;base64,")
+
+
+class TestPageSignalsSerialization:
+    def test_blocks_images_dimensions_preserved(self):
+        page = SimpleNamespace(
+            dimensions=SimpleNamespace(dpi=300, height=3300, width=2550),
+            blocks=[
+                SimpleNamespace(
+                    type="text",
+                    top_left_x=10,
+                    top_left_y=10,
+                    bottom_right_x=500,
+                    bottom_right_y=600,
+                    content="x" * 5000,
+                ),
+                SimpleNamespace(
+                    type="signature",
+                    top_left_x=10,
+                    top_left_y=700,
+                    bottom_right_x=300,
+                    bottom_right_y=760,
+                    content="J. Smith",
+                ),
+            ],
+            images=[
+                SimpleNamespace(
+                    id="img-1",
+                    top_left_x=1,
+                    top_left_y=2,
+                    bottom_right_x=3,
+                    bottom_right_y=4,
+                )
+            ],
+        )
+        signals = _serialize_page_signals(page)
+        assert signals["dimensions"] == {"dpi": 300, "height": 3300, "width": 2550}
+        text_block, sig_block = signals["blocks"]
+        # Long non-signature content is reduced to a length only.
+        assert text_block == {
+            "type": "text",
+            "bbox": [10, 10, 500, 600],
+            "content_chars": 5000,
+        }
+        assert "content" not in text_block
+        # Signature content (the transcribed name) is kept.
+        assert sig_block["content"] == "J. Smith"
+        assert signals["images"] == [{"id": "img-1", "bbox": [1, 2, 3, 4]}]
+
+    def test_signature_content_is_truncated(self):
+        page = SimpleNamespace(
+            dimensions=None,
+            blocks=[SimpleNamespace(type="signature", content="n" * 1000)],
+            images=[],
+        )
+        block = _serialize_page_signals(page)["blocks"][0]
+        assert len(block["content"]) == SIGNATURE_CONTENT_MAX_CHARS
+        assert block["bbox"] is None  # missing coordinates degrade to None
+
+    def test_missing_attributes_yield_empty_shape(self):
+        # The retry-loop fakes (SimpleNamespace without blocks) must serialize.
+        page = SimpleNamespace(markdown="hi", confidence_scores=None)
+        signals = _serialize_page_signals(page)
+        assert signals == {"dimensions": None, "blocks": [], "images": []}
+
+    def test_serializer_never_raises(self):
+        class Hostile:
+            @property
+            def blocks(self):
+                raise RuntimeError("boom")
+
+        signals = _serialize_page_signals(Hostile())
+        assert "serialization_error" in signals
+
+    def test_one_bad_block_does_not_erase_the_rest(self):
+        # A poisoned block must not hide the signature block next to it.
+        page = SimpleNamespace(
+            dimensions=None,
+            blocks=[
+                SimpleNamespace(type="text", content=12345),  # len(int) raises
+                SimpleNamespace(type="signature", content="J. Smith"),
+            ],
+            images=[],
+        )
+        blocks = _serialize_page_signals(page)["blocks"]
+        assert blocks[0]["type"] == "SERIALIZATION_ERROR"
+        assert blocks[1]["type"] == "signature"
+        assert blocks[1]["content"] == "J. Smith"
+
+    def test_image_truncation_is_flagged(self):
+        page = SimpleNamespace(
+            dimensions=None,
+            blocks=[],
+            images=[SimpleNamespace(id=f"img-{n}") for n in range(60)],
+        )
+        signals = _serialize_page_signals(page)
+        assert len(signals["images"]) == 50
+        assert signals["images_truncated"] is True
 
 
 class TestPageConfidence:
