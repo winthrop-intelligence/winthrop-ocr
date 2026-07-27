@@ -62,11 +62,6 @@ def failed_result(
     )
 
 
-# Inline data URLs travel in the request body; beyond this the provider
-# rejects the request (or worse, times it out). A 300-DPI letter page PNG is
-# ~2-8 MB, so this only trips on extreme DPI/page-size combinations.
-IMAGE_MAX_BYTES = 25 * 1024 * 1024
-
 _MEDIA_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -77,20 +72,10 @@ _MEDIA_TYPES = {
 
 
 def image_data_url(path: Path) -> str:
-    """Encode a local image as a base64 data URL.
-
-    Raises ValueError when the image exceeds ``IMAGE_MAX_BYTES`` — a clear
-    "lower the dpi" signal instead of an opaque provider-side failure.
-    """
+    """Encode a local image as a base64 data URL."""
 
     import base64  # pylint: disable=import-outside-toplevel
 
-    size = path.stat().st_size
-    if size > IMAGE_MAX_BYTES:
-        raise ValueError(
-            f"page image is {size} bytes (limit {IMAGE_MAX_BYTES}); "
-            "lower the profile dpi"
-        )
     media_type = _MEDIA_TYPES.get(path.suffix.lower(), "image/png")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{media_type};base64,{encoded}"
