@@ -25,10 +25,10 @@ class OcrPolicy:
     name: str = "default"
     engine: str = "mistral"
     dpi: int = 300
-    # Handwritten-alteration detection: one vision call per successfully
-    # OCR'd page (~2,500 input tokens / ~3.6s each). The model must be a
-    # pinned dated ID — Mistral's "-latest" aliases silently ride upgrades
-    # and price changes (mistral-medium-latest resolves to Medium 3.5).
+    # Handwritten-alteration detection: one vision call per page, run
+    # concurrently with OCR (~2,500 input tokens / ~3.6s each). The model
+    # must be a pinned dated ID — Mistral's "-latest" aliases silently ride
+    # upgrades and price changes (mistral-medium-latest resolves to 3.5).
     vision_enabled: bool = True
     vision_model: str = "mistral-medium-2505"
 

@@ -1,9 +1,11 @@
 """Handwritten-alteration detection via the Mistral vision model.
 
-One chat-completions call per successfully OCR'd page, sending the same
-rendered PNG the OCR engine used. Detection is an annotation like
-:mod:`ocr_engine.review`'s flags: it soft-fails — ``detect_alterations``
-never raises, and a non-success status must never fail a page or document.
+One chat-completions call per page when vision is enabled, sending the
+same rendered PNG the OCR engine uses (the call runs concurrently with
+OCR, so a verdict is recorded even when the page's OCR fails). Detection
+is an annotation like :mod:`ocr_engine.review`'s flags: it soft-fails —
+``detect_alterations`` never raises, and a non-success status must never
+fail a page or document.
 
 Validated against user-confirmed hand-altered contracts: the model's flag
 (which page/clause) is reliable, its value transcriptions are not — so the
@@ -138,6 +140,31 @@ def _failed(
     )
 
 
+def _vision_request_kwargs(*, model: str, image_url: str) -> dict[str, Any]:
+    """The exact chat-completions request the vision call sends.
+
+    Kept as a separate builder so tests can bind it against the REAL SDK's
+    signature — an SDK upgrade that renames or drops a parameter must fail
+    a unit test, not silently soft-fail vision on every production page.
+    """
+
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": ALTERATIONS_PROMPT},
+                    {"type": "image_url", "image_url": image_url},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "timeout_ms": VISION_ATTEMPT_TIMEOUT_MS,
+    }
+
+
 def _complete_vision_with_retries(
     *, api_key: str, image_url: str, model: str
 ) -> tuple[Any, int]:
@@ -146,24 +173,11 @@ def _complete_vision_with_retries(
     # pylint: disable-next=import-outside-toplevel,import-error
     from mistralai.client import Mistral
 
+    request = _vision_request_kwargs(model=model, image_url=image_url)
     for attempt in range(VISION_MAX_ATTEMPTS):
         try:
             client = Mistral(api_key=api_key)
-            response = client.chat.complete(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": ALTERATIONS_PROMPT},
-                            {"type": "image_url", "image_url": image_url},
-                        ],
-                    }
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-                timeout_ms=VISION_ATTEMPT_TIMEOUT_MS,
-            )
+            response = client.chat.complete(**request)
             return response, attempt
         except Exception as exc:
             final_attempt = attempt == VISION_MAX_ATTEMPTS - 1

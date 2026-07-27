@@ -299,6 +299,33 @@ class TestDetectAlterations:
         assert calls == []
 
 
+class TestRealSdkContract:
+    def test_request_kwargs_bind_to_the_real_sdk_signature(self):
+        """Guard against SDK upgrades renaming/dropping request parameters.
+
+        The fake-SDK tests verify what we SEND; this binds the exact
+        production request against the REAL installed mistralai client's
+        signature (no network) so an incompatible upgrade fails here
+        instead of soft-failing vision on every production page.
+        """
+
+        import inspect
+
+        pytest.importorskip("mistralai")
+        # The real import path used by the production code.
+        from mistralai.client import Mistral  # pylint: disable=import-error
+
+        from ocr_engine.vision import _vision_request_kwargs
+
+        client = Mistral(api_key="test-key")  # construction is offline
+        request = _vision_request_kwargs(
+            model="mistral-medium-2505",
+            image_url="data:image/png;base64,x",
+        )
+        # Raises TypeError if any parameter name is not accepted.
+        inspect.signature(client.chat.complete).bind(**request)
+
+
 class TestPageAlterationsModel:
     def test_roundtrip(self):
         original = PageAlterations(

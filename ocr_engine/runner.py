@@ -141,7 +141,10 @@ def run_page(
         # Vision needs only the rendered image, never the OCR text, so both
         # network calls run concurrently: page latency is max(ocr, vision),
         # not their sum. detect_alterations never raises, so .result() is
-        # safe to collect unconditionally.
+        # safe to collect unconditionally. The nested single-thread pool is
+        # deliberate: one short-lived extra thread per in-flight page
+        # (bounded by the document's max_workers) is cheap for I/O-bound
+        # calls, and a shared pool would add lifetime/shutdown coupling.
         with ThreadPoolExecutor(max_workers=1) as pool:
             vision_future = pool.submit(detect_alterations, page, policy)
             result = engine.extract(page)
