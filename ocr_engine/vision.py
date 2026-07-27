@@ -21,9 +21,9 @@ from typing import Any
 
 from ocr_engine.adapters.base import image_data_url, module_available
 from ocr_engine.adapters.mistral import (
-    _is_retryable_mistral_error,
-    _mistral_error_status,
-    _retry_delay,
+    is_retryable_mistral_error,
+    mistral_error_status,
+    retry_delay,
 )
 from ocr_engine.models import PageAlterations, PageInput
 from ocr_engine.policy import OcrPolicy
@@ -38,6 +38,9 @@ VISION_MAX_ATTEMPTS = 2
 # stretch the worst-case in-flight drain after a caller abort.
 VISION_ATTEMPT_TIMEOUT_MS = 60_000
 MAX_ALTERATION_ENTRIES = 50
+# Entry values are model-generated strings; bound them like the OCR
+# adapter bounds its serialized signals.
+ENTRY_VALUE_MAX_CHARS = 300
 RAW_EXCERPT_MAX_CHARS = 2000
 
 # Benchmark-validated (100% detection recall on confirmed altered pages).
@@ -65,6 +68,9 @@ ALTERATIONS_PROMPT = (
 # (e.g. value transcriptions) is dropped — those were wrong too often to
 # ever be ingested as data.
 ALLOWED_ENTRY_KEYS = ("clause", "kind")
+# Every surfaced entry has exactly this kind vocabulary; anything else the
+# model invents is normalized to "other".
+ALLOWED_KINDS = frozenset({"dollar_amount", "date", "other"})
 
 
 def detect_alterations(page: PageInput, policy: OcrPolicy) -> PageAlterations:
@@ -92,20 +98,22 @@ def detect_alterations(page: PageInput, policy: OcrPolicy) -> PageAlterations:
             model=policy.vision_model,
         )
         raw_text = _response_text(response)
-        alterations, none_found = _parse_alterations(raw_text)
+        alterations = _parse_alterations(raw_text)
     except ValueError as exc:
         elapsed = round((time.perf_counter() - started) * 1000)
         return _failed(policy, "parse_error", exc, elapsed_ms=elapsed)
     except Exception as exc:  # SDK exposes several transport exception classes.
         elapsed = round((time.perf_counter() - started) * 1000)
-        return _failed(policy, _mistral_error_status(exc), exc, elapsed_ms=elapsed)
+        return _failed(policy, mistral_error_status(exc), exc, elapsed_ms=elapsed)
 
     elapsed = round((time.perf_counter() - started) * 1000)
     return PageAlterations(
         status="success",
         model=policy.vision_model,
         alterations=alterations,
-        none_found=none_found,
+        # Derived, never taken from the model: one source of truth means a
+        # verdict can never claim "flagged" and "none found" at once.
+        none_found=not alterations,
         elapsed_ms=elapsed,
         transport_retries=transport_retries,
     )
@@ -159,9 +167,9 @@ def _complete_vision_with_retries(
             return response, attempt
         except Exception as exc:
             final_attempt = attempt == VISION_MAX_ATTEMPTS - 1
-            if final_attempt or not _is_retryable_mistral_error(exc):
+            if final_attempt or not is_retryable_mistral_error(exc):
                 raise
-            delay = _retry_delay(exc, attempt)
+            delay = retry_delay(exc, attempt)
             logger.debug(
                 "Vision attempt %d/%d failed (%s); retrying in %.1fs",
                 attempt + 1,
@@ -195,12 +203,14 @@ def _response_text(response: Any) -> str:
     raise ValueError(f"vision response content has unexpected type {type(content).__name__}")
 
 
-def _parse_alterations(text: str) -> tuple[list[dict[str, Any]], bool | None]:
+def _parse_alterations(text: str) -> list[dict[str, Any]]:
     """Parse the model's JSON verdict; raises ValueError on any mismatch.
 
     With response_format=json_object malformed output should be rare, so a
     single local repair (outermost braces) is attempted — never a second
-    API call.
+    API call. Entries are validated strictly: an entry survives only with a
+    non-empty string clause, its kind is normalized to ALLOWED_KINDS, and
+    the model's own none_found claim is ignored (the caller derives it).
     """
 
     cleaned = text.strip()
@@ -228,10 +238,28 @@ def _parse_alterations(text: str) -> tuple[list[dict[str, Any]], bool | None]:
         raise ValueError(
             f"vision response missing 'alterations' list: {cleaned[:RAW_EXCERPT_MAX_CHARS]}"
         )
-    alterations = [
-        {key: entry[key] for key in ALLOWED_ENTRY_KEYS if key in entry}
-        for entry in payload["alterations"][:MAX_ALTERATION_ENTRIES]
-        if isinstance(entry, dict)
-    ]
-    none_found = payload.get("none_found")
-    return alterations, bool(none_found) if none_found is not None else None
+    alterations = []
+    for entry in payload["alterations"][:MAX_ALTERATION_ENTRIES]:
+        validated = _validated_entry(entry)
+        if validated is not None:
+            alterations.append(validated)
+    return alterations
+
+
+def _validated_entry(entry: Any) -> dict[str, Any] | None:
+    """One strict, bounded entry — or None when the model's entry is junk.
+
+    A flag with no locatable clause is useless to the human reviewer, so
+    entries without a non-empty string clause are dropped rather than
+    surfaced as empty dicts.
+    """
+
+    if not isinstance(entry, dict):
+        return None
+    clause = entry.get("clause")
+    if not isinstance(clause, str) or not clause.strip():
+        return None
+    kind = entry.get("kind")
+    if kind not in ALLOWED_KINDS:
+        kind = "other"
+    return {"clause": clause.strip()[:ENTRY_VALUE_MAX_CHARS], "kind": kind}

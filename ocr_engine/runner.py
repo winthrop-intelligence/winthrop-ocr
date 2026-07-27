@@ -134,6 +134,9 @@ def run_page(
 ) -> PageOutcome:
     """OCR one rendered page through the configured engine."""
 
+    # Resolve the engine before submitting vision: a bad engine name must
+    # raise immediately, not after blocking on an in-flight vision call.
+    engine = engines[policy.engine]
     if policy.vision_enabled:
         # Vision needs only the rendered image, never the OCR text, so both
         # network calls run concurrently: page latency is max(ocr, vision),
@@ -141,10 +144,10 @@ def run_page(
         # safe to collect unconditionally.
         with ThreadPoolExecutor(max_workers=1) as pool:
             vision_future = pool.submit(detect_alterations, page, policy)
-            result = engines[policy.engine].extract(page)
+            result = engine.extract(page)
             alterations = vision_future.result()
     else:
-        result = engines[policy.engine].extract(page)
+        result = engine.extract(page)
         alterations = None
     review = (
         detect_review_flags(result)

@@ -171,10 +171,70 @@ class TestDetectAlterations:
     def test_entries_are_bounded(self, fake_sdk, tmp_path):
         _calls, _script, reply = fake_sdk
         reply["content"] = json.dumps(
-            {"alterations": [{"kind": "other"}] * 80, "none_found": False}
+            {
+                "alterations": [{"clause": "c", "kind": "other"}] * 80,
+                "none_found": False,
+            }
         )
         result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
         assert len(result.alterations) == MAX_ALTERATION_ENTRIES
+
+    def test_contradictory_verdict_cannot_surface(self, fake_sdk, tmp_path):
+        # {"alterations": [{}], "none_found": true}: the empty entry is junk
+        # (no locatable clause) and none_found is derived, never trusted —
+        # so the verdict resolves to a consistent "nothing found".
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"alterations": [{}], "none_found": True})
+        result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
+        assert result.status == "success"
+        assert result.alterations == []
+        assert result.flagged is False
+        assert result.none_found is True
+
+    def test_none_found_is_derived_not_coerced(self, fake_sdk, tmp_path):
+        # A model returning the STRING "false" must not become True via
+        # bool(); none_found comes from the entries alone.
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps(
+            {
+                "alterations": [{"clause": "4", "kind": "date"}],
+                "none_found": "false",
+            }
+        )
+        result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
+        assert result.flagged is True
+        assert result.none_found is False
+
+    def test_unknown_kind_is_normalized_and_junk_entries_dropped(
+        self, fake_sdk, tmp_path
+    ):
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps(
+            {
+                "alterations": [
+                    {"clause": "4", "kind": "banana"},  # invented kind
+                    {"kind": "date"},  # no clause: useless to a reviewer
+                    {"clause": 12, "kind": "date"},  # non-string clause
+                    {"clause": "   ", "kind": "date"},  # blank clause
+                ],
+                "none_found": False,
+            }
+        )
+        result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
+        assert result.alterations == [{"clause": "4", "kind": "other"}]
+
+    def test_entry_values_are_bounded(self, fake_sdk, tmp_path):
+        from ocr_engine.vision import ENTRY_VALUE_MAX_CHARS
+
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps(
+            {
+                "alterations": [{"clause": "x" * 5000, "kind": "other"}],
+                "none_found": False,
+            }
+        )
+        result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
+        assert len(result.alterations[0]["clause"]) == ENTRY_VALUE_MAX_CHARS
 
     def test_transient_error_is_retried_then_succeeds(self, fake_sdk, tmp_path):
         calls, script, _reply = fake_sdk

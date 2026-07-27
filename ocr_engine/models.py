@@ -37,9 +37,12 @@ class PageAlterations:
 
     status: str
     model: str
-    # Flag-only entries: {"clause": ..., "kind": "dollar_amount|date|other"}.
-    # Value transcriptions are stripped before this is built.
+    # Flag-only entries: {"clause": ..., "kind": "dollar_amount|date|other"},
+    # validated and bounded. Value transcriptions are stripped before this
+    # is built.
     alterations: list[dict[str, Any]] = field(default_factory=list)
+    # Derived from ``alterations`` on success (never taken from the model,
+    # so it cannot contradict ``flagged``); None on failed detections.
     none_found: bool | None = None
     elapsed_ms: int = 0
     transport_retries: int = 0

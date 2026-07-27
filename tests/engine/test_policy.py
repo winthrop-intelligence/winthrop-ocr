@@ -81,3 +81,10 @@ class TestVisionPolicy:
             resolve_policy("contracts", overrides={"vision_model": ""})
         with pytest.raises(ValueError, match="vision_enabled"):
             resolve_policy("contracts", overrides={"vision_enabled": "yes"})
+
+    def test_undated_model_names_are_rejected(self):
+        # Vision soft-fails, so a typo'd model would silently fail detection
+        # on every page; the dated-suffix contract catches it up front.
+        for bad in ("mistral-medium", "mistral-medium-25o5", "pixtral-large"):
+            with pytest.raises(ValueError, match="date suffix"):
+                resolve_policy("contracts", overrides={"vision_model": bad})

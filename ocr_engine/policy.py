@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
@@ -65,6 +66,13 @@ class OcrPolicy:
                 f"vision_model must be a pinned dated ID, not an alias: "
                 f"{self.vision_model!r} (aliases silently ride model upgrades "
                 "and price changes)"
+            )
+        if re.search(r"-\d{4}$", self.vision_model) is None:
+            # Because vision soft-fails, a typo'd model would silently fail
+            # detection on every page; catch it at configuration time.
+            raise ValueError(
+                f"vision_model must be a pinned dated ID ending in a date "
+                f"suffix like -2505, got {self.vision_model!r}"
             )
 
 
