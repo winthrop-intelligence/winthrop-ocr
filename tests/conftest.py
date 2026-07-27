@@ -5,9 +5,22 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw
 
 from ocr_engine.models import OCRResult, PageInput
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mistral_key(monkeypatch):
+    """Tests must never reach the real API via a developer's exported key.
+
+    Vision detection (policy default: enabled) soft-fails to "unavailable"
+    without touching the SDK when the key is absent; tests that need a key
+    set their own after this runs.
+    """
+
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
 
 def draw_text_like_page(path: Path) -> Path:

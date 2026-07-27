@@ -318,3 +318,11 @@ def _mistral_error_status(error: Exception) -> str:
     if "timeout" in message or "timed out" in message:
         return "timeout"
     return "crash"
+
+
+# Public names for the transport/error helpers shared with other Mistral
+# callers in this package (ocr_engine.vision); the underscored names remain
+# the internal spelling used by this module and its tests.
+is_retryable_mistral_error = _is_retryable_mistral_error
+mistral_error_status = _mistral_error_status
+retry_delay = _retry_delay

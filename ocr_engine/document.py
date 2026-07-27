@@ -97,9 +97,11 @@ def ocr_document(
       are in flight (keeps callers' runtime alerting alive). If it raises,
       its exception propagates UNWRAPPED (it is the caller's own signal,
       not an OCR failure); no further pages are submitted, but pages
-      already in flight finish first — each bounded by the engine's retry
-      budget (attempts x per-attempt timeout, a few minutes worst case) —
-      so the raise can take that long to surface.
+      already in flight finish first — each bounded by the larger of the
+      engine's retry budget (attempts x per-attempt timeout, a few minutes
+      worst case) and, when vision detection is enabled, the concurrent
+      vision retry budget (2 attempts x 60s) — so the raise can take that
+      long to surface.
 
     Returns an :class:`OcrDocumentResult` with pages in order; ``.text``
     joins pages with form-feed. Raises :class:`OcrDocumentError` when the

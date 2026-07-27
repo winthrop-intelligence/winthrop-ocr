@@ -42,3 +42,49 @@ class TestResolvePolicy:
         base = resolve_policy("default")
         tuned = resolve_policy("default", overrides={"dpi": 400})
         assert base.fingerprint() != tuned.fingerprint()
+
+
+class TestVisionPolicy:
+    def test_vision_defaults_per_profile(self):
+        # Alterations are a contracts concept; the (currently unused)
+        # job_postings profile must not pay for vision.
+        assert resolve_policy("default").vision_enabled is True
+        assert resolve_policy("contracts").vision_enabled is True
+        assert resolve_policy("job_postings").vision_enabled is False
+
+    def test_vision_model_is_pinned_by_default(self):
+        for profile in ("default", "contracts", "job_postings"):
+            assert resolve_policy(profile).vision_model == "mistral-medium-2505"
+
+    def test_vision_overrides_apply(self):
+        off = resolve_policy("contracts", overrides={"vision_enabled": False})
+        assert off.vision_enabled is False
+        pinned = resolve_policy(
+            "contracts", overrides={"vision_model": "mistral-medium-2508"}
+        )
+        assert pinned.vision_model == "mistral-medium-2508"
+
+    def test_vision_overrides_change_fingerprint(self):
+        base = resolve_policy("contracts")
+        off = resolve_policy("contracts", overrides={"vision_enabled": False})
+        assert base.fingerprint() != off.fingerprint()
+
+    def test_alias_models_are_rejected(self):
+        # "-latest" aliases silently ride upgrades and price changes.
+        with pytest.raises(ValueError, match="pinned dated ID"):
+            resolve_policy(
+                "contracts", overrides={"vision_model": "mistral-medium-latest"}
+            )
+
+    def test_invalid_vision_values_are_rejected(self):
+        with pytest.raises(ValueError, match="vision_model"):
+            resolve_policy("contracts", overrides={"vision_model": ""})
+        with pytest.raises(ValueError, match="vision_enabled"):
+            resolve_policy("contracts", overrides={"vision_enabled": "yes"})
+
+    def test_undated_model_names_are_rejected(self):
+        # Vision soft-fails, so a typo'd model would silently fail detection
+        # on every page; the dated-suffix contract catches it up front.
+        for bad in ("mistral-medium", "mistral-medium-25o5", "pixtral-large"):
+            with pytest.raises(ValueError, match="date suffix"):
+                resolve_policy("contracts", overrides={"vision_model": bad})

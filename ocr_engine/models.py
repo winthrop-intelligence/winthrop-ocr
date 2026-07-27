@@ -20,6 +20,55 @@ class PageInput:
 
 
 @dataclass
+class PageAlterations:
+    """Handwritten-alteration detection for one page (vision model verdict).
+
+    The verdict is deliberately flag-only. The vision model dependably
+    identifies WHICH page/clause carries a hand alteration, but its value
+    transcriptions proved unreliable in benchmarks, so entries carry only
+    ``clause`` and ``kind`` — never the struck or replacement values.
+    Consumers route flagged pages to human review of the actual scan.
+
+    ``status`` mirrors OCRResult statuses ("success", "unavailable",
+    "parse_error", "rate_limited", "auth_error", "timeout", "crash").
+    Detection soft-fails: a non-success status annotates the page, it never
+    fails the page or document.
+    """
+
+    status: str
+    model: str
+    # Flag-only entries: {"clause": ..., "kind": "dollar_amount|date|other"},
+    # validated and bounded. Value transcriptions are stripped before this
+    # is built.
+    alterations: list[dict[str, Any]] = field(default_factory=list)
+    # Derived from ``alterations`` on success (never taken from the model,
+    # so it cannot contradict ``flagged``); None on failed detections.
+    none_found: bool | None = None
+    elapsed_ms: int = 0
+    transport_retries: int = 0
+    error_type: str | None = None
+    error_message: str | None = None
+
+    @property
+    def flagged(self) -> bool:
+        """Whether the vision model reported at least one alteration."""
+
+        return self.status == "success" and bool(self.alterations)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PageAlterations:
+        """Restore a serialized result, ignoring unknown (newer/older) fields."""
+
+        known_fields = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known_fields})
+
+
+@dataclass
 class OCRResult:
     """Normalized result from one engine for one page."""
 
