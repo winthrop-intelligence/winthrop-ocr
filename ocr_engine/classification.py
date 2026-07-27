@@ -13,6 +13,15 @@ failure direction is an unnecessary OCR call, never lost content.
 Classification is fail-safe: every error (missing tool, unreadable or
 password-protected PDF, timeout) downgrades to "send to OCR" and never
 raises past :func:`classify_document`.
+
+Known limitation (accepted in SCR-2285): purely VECTOR-drawn marks —
+ink/markup annotations or signatures drawn as paths rather than pixels —
+are invisible to ``pdfimages``, so a text-rich page carrying only vector
+marks classifies as digital and skips OCR and vision. Zero such pages
+existed across the 281 validated contract pages (e-sign tools embed
+signatures as raster images), and anything printed-and-scanned becomes
+raster anyway. If vector marks show up in practice, harden by counting
+``page.curves``/annotations via pdfplumber before trusting the skip.
 """
 
 from __future__ import annotations

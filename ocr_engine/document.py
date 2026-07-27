@@ -241,8 +241,9 @@ def _digital_page_outcome(
     """Synthesize the success outcome for a born-digital page.
 
     The page never renders, so there is no image for the vision pass
-    (``alterations=None``, the same shape as ``vision_enabled=False``) —
-    and with zero embedded images there is provably no raster handwriting.
+    (``alterations=None``, the same shape as ``vision_enabled=False``);
+    with zero embedded raster images the vision/alteration pass is
+    skipped (see the vector-content caveat in ``ocr_engine.classification``).
     Review flags stay all-False: they are OCR-confidence heuristics and
     exact digital text needs no review.
     """

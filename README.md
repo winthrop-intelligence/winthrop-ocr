@@ -134,8 +134,8 @@ for page in result.pages:
         page.selected.text                # exact embedded text (pdftotext)
         page.selected.confidence          # 100.0 — exact, not a model estimate
         page.selected.metadata["classification"]  # reason / char_count / image_count
-        page.alterations                  # None: no rendered image, provably no
-                                          # raster handwriting on a zero-image page
+        page.alterations                  # None: no rendered image, so the
+                                          # vision/alteration pass doesn't run
 result.summary()["digital_pages"]
 ```
 
@@ -144,7 +144,10 @@ tool, timeout) sends the page through the normal render+OCR path and never
 fails the document. The worst failure mode is an unnecessary OCR call —
 never lost content. Opt out per-run with
 `overrides={"skip_digital_pages": False}`. Single-image sources are never
-classified (PDF-only).
+classified (PDF-only). Known limitation: purely vector-drawn marks
+(annotation ink, path-drawn signatures) are invisible to `pdfimages` and
+would be skipped — zero such pages existed in the 281 validated contract
+pages; see `ocr_engine/classification.py` for the hardening path.
 
 ## Profiles
 
