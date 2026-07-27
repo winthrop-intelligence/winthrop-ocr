@@ -62,12 +62,12 @@ def failed_result(
     )
 
 
-# Mistral OCR accepts at most 50 MB per document, measured on what it
-# receives: the base64 data URL, which inflates the image by 4/3. Capping
-# the on-disk image at 35 MiB keeps the encoded payload near 49 MB —
-# under the ceiling whichever way Mistral counts (50 MB or 50 MiB) —
-# so nothing passes this guard only to be rejected provider-side.
-IMAGE_MAX_BYTES = 35 * 1024 * 1024
+# Matches Mistral OCR's documented 50 MB per-document ceiling, applied to
+# the on-disk image. The provider measures the base64 data URL (4/3 the
+# image), so pages above ~37 MiB pass this guard but may still be
+# rejected provider-side; the guard's job is bounding encoding memory and
+# failing clearly on extreme renders, not predicting Mistral's verdict.
+IMAGE_MAX_BYTES = 50 * 1024 * 1024
 
 _MEDIA_TYPES = {
     ".png": "image/png",
@@ -91,9 +91,8 @@ def image_data_url(path: Path) -> str:
     size = path.stat().st_size
     if size > IMAGE_MAX_BYTES:
         raise ValueError(
-            f"page image is {size} bytes (limit {IMAGE_MAX_BYTES}, from "
-            "Mistral's 50 MB request cap after base64 inflation); "
-            "lower the profile dpi"
+            f"page image is {size} bytes (limit {IMAGE_MAX_BYTES}, matching "
+            "Mistral's 50 MB document cap); lower the profile dpi"
         )
     media_type = _MEDIA_TYPES.get(path.suffix.lower(), "image/png")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
