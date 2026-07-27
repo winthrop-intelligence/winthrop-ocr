@@ -62,10 +62,12 @@ def failed_result(
     )
 
 
-# Inline data URLs travel in the request body; beyond this the provider
-# rejects the request (or worse, times it out). A 300-DPI letter page PNG is
-# ~2-8 MB, so this only trips on extreme DPI/page-size combinations.
-IMAGE_MAX_BYTES = 25 * 1024 * 1024
+# Matches Mistral OCR's documented 50 MB per-document ceiling, applied to
+# the on-disk image. The provider measures the base64 data URL (4/3 the
+# image), so pages above ~37 MiB pass this guard but may still be
+# rejected provider-side; the guard's job is bounding encoding memory and
+# failing clearly on extreme renders, not predicting Mistral's verdict.
+IMAGE_MAX_BYTES = 50 * 1024 * 1024
 
 _MEDIA_TYPES = {
     ".png": "image/png",
@@ -80,7 +82,8 @@ def image_data_url(path: Path) -> str:
     """Encode a local image as a base64 data URL.
 
     Raises ValueError when the image exceeds ``IMAGE_MAX_BYTES`` — a clear
-    "lower the dpi" signal instead of an opaque provider-side failure.
+    "lower the dpi" signal instead of an opaque provider-side rejection,
+    and a bound on encoding memory before the full image is read.
     """
 
     import base64  # pylint: disable=import-outside-toplevel
@@ -88,8 +91,8 @@ def image_data_url(path: Path) -> str:
     size = path.stat().st_size
     if size > IMAGE_MAX_BYTES:
         raise ValueError(
-            f"page image is {size} bytes (limit {IMAGE_MAX_BYTES}); "
-            "lower the profile dpi"
+            f"page image is {size} bytes (limit {IMAGE_MAX_BYTES}, matching "
+            "Mistral's 50 MB document cap); lower the profile dpi"
         )
     media_type = _MEDIA_TYPES.get(path.suffix.lower(), "image/png")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")

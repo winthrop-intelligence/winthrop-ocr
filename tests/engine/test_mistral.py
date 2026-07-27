@@ -152,6 +152,13 @@ class TestImageDataUrl:
         with pytest.raises(ValueError, match="lower the profile dpi"):
             base.image_data_url(image)
 
+    def test_image_under_limit_encodes(self, tmp_path):
+        from ocr_engine.adapters import base
+
+        image = tmp_path / "page.png"
+        image.write_bytes(b"data")
+        assert base.image_data_url(image).startswith("data:image/png;base64,")
+
     def test_media_type_follows_suffix(self, tmp_path):
         from ocr_engine.adapters import base
 
