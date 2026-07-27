@@ -52,7 +52,7 @@ RAW_EXCERPT_MAX_CHARS = 2000
 # benchmarks, so they are neither requested nor accepted (see
 # ALLOWED_ENTRY_KEYS) — a human reads the real values off the scan.
 ALTERATIONS_PROMPT = (
-    "You are examining one page of a scanned athletic game contract. Look "
+    "You are examining one page of a scanned contract. Look "
     "carefully for any place where PRINTED/TYPED text — especially a dollar "
     "amount or a date — has been physically crossed out (struck through) "
     "and/or replaced with HANDWRITING. Also look for handwritten values "
