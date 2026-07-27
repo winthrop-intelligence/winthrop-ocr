@@ -144,6 +144,72 @@ class TestSuccess:
         assert summary["handwriting_pages"] == 1
 
 
+class TestVision:
+    @staticmethod
+    def install_detector(monkeypatch, verdict_for_page):
+        """Patch detection at the runner's lookup site; return the call log."""
+
+        from ocr_engine import runner as runner_module
+
+        calls = []
+
+        def _detect(page, policy):
+            calls.append(page.page_number)
+            return verdict_for_page(page.page_number)
+
+        monkeypatch.setattr(runner_module, "detect_alterations", _detect)
+        return calls
+
+    def test_flagged_page_flows_through(self, tmp_path, fake_registry, monkeypatch):
+        from ocr_engine.models import PageAlterations
+
+        def verdict(page_number):
+            if page_number == 2:
+                return PageAlterations(
+                    status="success",
+                    model="mistral-medium-2505",
+                    alterations=[{"kind": "date", "clause": "1"}],
+                    none_found=False,
+                )
+            return PageAlterations(
+                status="success", model="mistral-medium-2505", none_found=True
+            )
+
+        calls = self.install_detector(monkeypatch, verdict)
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=3)
+        result = ocr_document(pdf, profile="contracts")
+        assert sorted(calls) == [1, 2, 3]
+        flagged = [outcome.page_number for outcome in result.pages if outcome.alterations.flagged]
+        assert flagged == [2]
+        assert result.summary()["alteration_pages"] == 1
+        assert result.summary()["vision_failed_pages"] == 0
+
+    def test_vision_failure_never_fails_the_document(
+        self, tmp_path, fake_registry, monkeypatch
+    ):
+        from ocr_engine.models import PageAlterations
+
+        self.install_detector(
+            monkeypatch,
+            lambda _page_number: PageAlterations(status="crash", model="m"),
+        )
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=2)
+        result = ocr_document(pdf, profile="contracts")  # must not raise
+        assert result.summary()["pages_failed"] == 0
+        assert result.summary()["vision_failed_pages"] == 2
+
+    def test_job_postings_profile_skips_vision(
+        self, tmp_path, fake_registry, monkeypatch
+    ):
+        calls = self.install_detector(monkeypatch, lambda _n: None)
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=2)
+        result = ocr_document(pdf, profile="job_postings")
+        assert calls == []
+        assert all(outcome.alterations is None for outcome in result.pages)
+        assert result.summary()["alteration_pages"] == 0
+        assert result.summary()["vision_elapsed_ms"] == 0
+
+
 class TestStrictFailures:
     def test_any_failed_page_raises_naming_the_pages(self, tmp_path, monkeypatch):
         engine = FakeEngine("mistral", status="crash")

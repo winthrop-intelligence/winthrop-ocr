@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
-POLICY_VERSION = "2026-07-22"
+POLICY_VERSION = "2026-07-27"
 
 DPI_MIN, DPI_MAX = 72, 600
 
@@ -24,6 +24,12 @@ class OcrPolicy:
     name: str = "default"
     engine: str = "mistral"
     dpi: int = 300
+    # Handwritten-alteration detection: one vision call per successfully
+    # OCR'd page (~2,500 input tokens / ~3.6s each). The model must be a
+    # pinned dated ID — Mistral's "-latest" aliases silently ride upgrades
+    # and price changes (mistral-medium-latest resolves to Medium 3.5).
+    vision_enabled: bool = True
+    vision_model: str = "mistral-medium-2505"
 
     def fingerprint(self) -> str:
         """Stable hash of the fully resolved policy, including POLICY_VERSION.
@@ -46,6 +52,20 @@ class OcrPolicy:
             raise ValueError(f"dpi must be an integer, got {self.dpi!r}")
         if not DPI_MIN <= self.dpi <= DPI_MAX:
             raise ValueError(f"dpi must be within [{DPI_MIN}, {DPI_MAX}]")
+        if not isinstance(self.vision_enabled, bool):
+            raise ValueError(
+                f"vision_enabled must be a boolean, got {self.vision_enabled!r}"
+            )
+        if not isinstance(self.vision_model, str) or not self.vision_model:
+            raise ValueError(
+                f"vision_model must be a non-empty string, got {self.vision_model!r}"
+            )
+        if self.vision_model.endswith("-latest"):
+            raise ValueError(
+                f"vision_model must be a pinned dated ID, not an alias: "
+                f"{self.vision_model!r} (aliases silently ride model upgrades "
+                "and price changes)"
+            )
 
 
 def built_in_profiles() -> dict[str, OcrPolicy]:
@@ -54,7 +74,9 @@ def built_in_profiles() -> dict[str, OcrPolicy]:
     return {
         "default": OcrPolicy(name="default"),
         "contracts": OcrPolicy(name="contracts"),
-        "job_postings": OcrPolicy(name="job_postings"),
+        # Job posts have no hand-altered contract values; the profile is
+        # reserved for a future job_scraper migration and skips vision.
+        "job_postings": OcrPolicy(name="job_postings", vision_enabled=False),
     }
 
 

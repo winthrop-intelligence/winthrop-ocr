@@ -76,11 +76,45 @@ belongs to consumers.
 The library never touches your storage: fetching the source file and
 persisting the text are the caller's job.
 
+## Alteration detection (vision, v0.3.0)
+
+Scanned contracts sometimes carry **hand alterations**: a printed dollar
+amount or game date crossed out and replaced in pen, usually initialed.
+Plain OCR either garbles these or — worse — silently returns the
+superseded printed value as clean text. When `vision_enabled` is on
+(default for `default`/`contracts`), every page is also sent — same
+rendered image — to the **`mistral-medium-2505`** vision model. The
+vision call runs **concurrently with the OCR call** (it needs only the
+image), so page latency is max(ocr, vision), not their sum (~2,500 input
+tokens / ~4s per page):
+
+```python
+for page in result.pages:
+    alt = page.alterations            # PageAlterations | None (None = vision off)
+    if alt is not None and alt.flagged:
+        alt.alterations               # flag-only entries: clause, kind
+result.summary()["alteration_pages"], result.summary()["vision_failed_pages"]
+```
+
+**The verdict is flag-only by design.** Benchmarked on user-confirmed
+altered contracts, the model dependably identifies which page/clause was
+altered but routinely misread the struck and replacement values — so
+values are neither requested nor accepted (entries carry only `clause`
+and `kind`). Route flagged pages to human review of the actual scan to
+read the real values.
+
+Detection **soft-fails**: a vision error records a non-success
+`alt.status` ("rate_limited", "timeout", "parse_error", ...) and never
+fails the page or document — the OCR text stands on its own. Opt out
+per-run with `overrides={"vision_enabled": False}`. The model must be a
+pinned dated ID: `-latest` aliases are rejected by policy validation
+(they silently ride model upgrades and price changes).
+
 ## Profiles
 
-`default`, `contracts`, `job_postings` — currently identical settings
-(300 DPI); the split exists so consumers can be tuned independently via
-`ocr_engine/policy.py` or the `overrides` argument, e.g.
+`default`, `contracts` (300 DPI, vision on), and `job_postings` (vision
+off — job posts have no hand-altered contract values). Consumers are tuned
+independently via `ocr_engine/policy.py` or the `overrides` argument, e.g.
 `ocr_document(path, profile="contracts", overrides={"dpi": 400})`.
 Unknown override fields raise (a typo never silently keeps the default),
 and `result.policy_fingerprint` records the fully resolved configuration
@@ -92,10 +126,11 @@ for provenance.
 ocr_engine/
 ├── document.py    # ocr_document() — the entry point
 ├── review.py      # per-page review flags (signature / handwriting)
+├── vision.py      # per-page hand-alteration detection (Mistral vision)
 ├── runner.py      # run_page / OcrDocumentResult
 ├── rendering.py   # pdftoppm rendering, page counting, hashing
 ├── policy.py      # profiles + validation
-├── models.py      # PageInput / OCRResult
+├── models.py      # PageInput / OCRResult / PageAlterations
 └── adapters/      # mistral (status-aware retries), registry
 ```
 
