@@ -325,6 +325,30 @@ class TestRealSdkContract:
         # Raises TypeError if any parameter name is not accepted.
         inspect.signature(client.chat.complete).bind(**request)
 
+    def test_request_values_validate_through_the_sdk_typed_models(self):
+        """Run the nested payload through the SDK's own pydantic validation.
+
+        Name-binding alone cannot catch a schema change inside the values
+        (e.g. content chunks needing a different shape); constructing the
+        SDK's typed request model validates the full payload offline.
+        """
+
+        pytest.importorskip("mistralai")
+        from mistralai.client import models  # pylint: disable=import-error
+
+        from ocr_engine.vision import _vision_request_kwargs
+
+        request = _vision_request_kwargs(
+            model="mistral-medium-2505",
+            image_url="data:image/png;base64,x",
+        )
+        # timeout_ms is a transport option on the method, not a field of
+        # the request body model; the signature-bind test above covers it.
+        request.pop("timeout_ms")
+        validated = models.ChatCompletionRequest(**request)  # raises on mismatch
+        chunk_types = [type(c).__name__ for c in validated.messages[0].content]
+        assert chunk_types == ["TextChunk", "ImageURLChunk"]
+
 
 class TestPageAlterationsModel:
     def test_roundtrip(self):
