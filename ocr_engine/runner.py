@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ocr_engine.adapters.base import OCREngine
+from ocr_engine.classification import DIGITAL_TEXT_ENGINE
 from ocr_engine.models import OCRResult, PageAlterations, PageInput
 from ocr_engine.policy import OcrPolicy
 from ocr_engine.review import PageReviewFlags, detect_review_flags
@@ -80,6 +81,8 @@ class OcrDocumentResult:
 
         Note: elapsed_ms sums per-page engine time across concurrent pages,
         so it can exceed wall-clock — it approximates paid work, not latency.
+        mean_confidence blends model confidences with the exact-100 scores
+        of born-digital pages.
         """
 
         confidences = [
@@ -101,6 +104,7 @@ class OcrDocumentResult:
             "handwriting_pages": sum(
                 1 for outcome in self.pages if outcome.review.handwriting_suspected
             ),
+            "digital_pages": engines_used.get(DIGITAL_TEXT_ENGINE, 0),
             "min_confidence": min(confidences) if confidences else None,
             "mean_confidence": (
                 sum(confidences) / len(confidences) if confidences else None

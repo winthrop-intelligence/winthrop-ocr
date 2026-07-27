@@ -14,7 +14,8 @@ winthrop-ocr = {git = "https://github.com/winthrop-intelligence/winthrop-ocr.git
 
 System requirements:
 
-- **poppler-utils** (`pdftoppm`/`pdfinfo`) for page rendering — `apt-get install poppler-utils`
+- **poppler-utils** (`pdftoppm`/`pdfinfo` for rendering, `pdftotext`/`pdfimages`
+  for the digital-page skip) — `apt-get install poppler-utils`
 - **`MISTRAL_API_KEY`** in the environment
 
 ## Use
@@ -110,6 +111,41 @@ per-run with `overrides={"vision_enabled": False}`. The model must be a
 pinned dated ID: `-latest` aliases are rejected by policy validation
 (they silently ride model upgrades and price changes).
 
+## Digital-page skip (v0.4.0)
+
+Born-digital PDF pages don't need OCR: before rendering, every page is
+classified with Poppler (`pdftotext` + `pdfimages -list`), and a page
+**skips the Mistral call** only when it has **≥ 120 non-whitespace
+characters of embedded digital text AND zero embedded raster images**.
+There is deliberately **no image-size threshold** — on real contracts a
+DocuSign signature image covers ~1% of the page while a decorative
+letterhead logo covers ~9%, so size cannot separate content from
+decoration; any image at all routes the page to OCR. The character floor
+keeps stamp-only scans (e.g. a scanned page carrying just a digital
+"DocuSign Envelope ID" line) on the OCR path too.
+
+Skipped pages come back as normal success pages:
+
+```python
+from ocr_engine import DIGITAL_TEXT_ENGINE
+
+for page in result.pages:
+    if page.selected.engine == DIGITAL_TEXT_ENGINE:   # "digital-text"
+        page.selected.text                # exact embedded text (pdftotext)
+        page.selected.confidence          # 100.0 — exact, not a model estimate
+        page.selected.metadata["classification"]  # reason / char_count / image_count
+        page.alterations                  # None: no rendered image, provably no
+                                          # raster handwriting on a zero-image page
+result.summary()["digital_pages"]
+```
+
+Classification **fail-safes to OCR**: any error (unreadable PDF, missing
+tool, timeout) sends the page through the normal render+OCR path and never
+fails the document. The worst failure mode is an unnecessary OCR call —
+never lost content. Opt out per-run with
+`overrides={"skip_digital_pages": False}`. Single-image sources are never
+classified (PDF-only).
+
 ## Profiles
 
 `default`, `contracts` (300 DPI, vision on), and `job_postings` (vision
@@ -124,14 +160,15 @@ for provenance.
 
 ```
 ocr_engine/
-├── document.py    # ocr_document() — the entry point
-├── review.py      # per-page review flags (signature / handwriting)
-├── vision.py      # per-page hand-alteration detection (Mistral vision)
-├── runner.py      # run_page / OcrDocumentResult
-├── rendering.py   # pdftoppm rendering, page counting, hashing
-├── policy.py      # profiles + validation
-├── models.py      # PageInput / OCRResult / PageAlterations
-└── adapters/      # mistral (status-aware retries), registry
+├── document.py        # ocr_document() — the entry point
+├── classification.py  # pre-flight born-digital page detection (skip OCR)
+├── review.py          # per-page review flags (signature / handwriting)
+├── vision.py          # per-page hand-alteration detection (Mistral vision)
+├── runner.py          # run_page / OcrDocumentResult
+├── rendering.py       # pdftoppm rendering, page counting, hashing
+├── policy.py          # profiles + validation
+├── models.py          # PageInput / OCRResult / PageAlterations
+└── adapters/          # mistral (status-aware retries), registry
 ```
 
 ## Develop

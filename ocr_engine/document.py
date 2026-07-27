@@ -19,13 +19,21 @@ from pathlib import Path
 from typing import Any
 
 from ocr_engine.adapters.registry import engine_registry
-from ocr_engine.policy import POLICY_VERSION, resolve_policy
+from ocr_engine.classification import (
+    DIGITAL_TEXT_ENGINE,
+    MIN_DIGITAL_TEXT_CHARS,
+    PageClassification,
+    classify_document,
+)
+from ocr_engine.models import OCRResult
+from ocr_engine.policy import POLICY_VERSION, OcrPolicy, resolve_policy
 from ocr_engine.rendering import (
     document_id,
     image_page_input,
     pdf_page_count,
     render_page_input,
 )
+from ocr_engine.review import PageReviewFlags
 from ocr_engine.runner import OcrDocumentResult, PageOutcome, run_page
 
 logger = logging.getLogger(__name__)
@@ -152,10 +160,20 @@ def ocr_document(
     except OSError as exc:
         raise OcrDocumentError(f"could not read {source.name}: {exc}") from exc
 
+    # Computed once on the calling thread before workers start; workers
+    # only read it. classify_document never raises (errors mean OCR).
+    classifications = _preflight_classifications(source, is_pdf, policy, page_count)
+    digital_count = sum(
+        1 for verdict in classifications.values() if verdict.is_digital
+    )
+
     with tempfile.TemporaryDirectory(prefix="ocr-doc-") as temp_dir:
         pages_dir = Path(temp_dir)
 
         def process_page(page_number: int) -> PageOutcome:
+            verdict = classifications.get(page_number)
+            if verdict is not None and verdict.is_digital:
+                return _digital_page_outcome(identifier, verdict)
             if is_pdf:
                 page = render_page_input(
                     source, page_number, pages_dir, dpi=policy.dpi, identifier=identifier
@@ -172,7 +190,11 @@ def ocr_document(
                     page.image_path.unlink()
 
         logger.info(
-            "OCR starting for %s: %d page(s), profile=%s", source.name, page_count, profile
+            "OCR starting for %s: %d page(s), profile=%s, %d digital page(s) skip OCR",
+            source.name,
+            page_count,
+            profile,
+            digital_count,
         )
         outcomes, failures = _collect_pages(
             process_page, page_count, max_workers, runtime_check
@@ -200,6 +222,55 @@ def ocr_document(
         policy_version=POLICY_VERSION,
         pages=[outcomes[number] for number in sorted(outcomes)],
         policy_fingerprint=policy.fingerprint(),
+    )
+
+
+def _preflight_classifications(
+    source: Path, is_pdf: bool, policy: OcrPolicy, page_count: int
+) -> dict[int, PageClassification]:
+    """Classify pages for the digital skip; empty when it does not apply."""
+
+    if not (is_pdf and policy.skip_digital_pages):
+        return {}
+    return classify_document(source, page_count)
+
+
+def _digital_page_outcome(
+    identifier: str, verdict: PageClassification
+) -> PageOutcome:
+    """Synthesize the success outcome for a born-digital page.
+
+    The page never renders, so there is no image for the vision pass
+    (``alterations=None``, the same shape as ``vision_enabled=False``) —
+    and with zero embedded images there is provably no raster handwriting.
+    Review flags stay all-False: they are OCR-confidence heuristics and
+    exact digital text needs no review.
+    """
+
+    result = OCRResult(
+        document_id=identifier,
+        page_number=verdict.page_number,
+        engine=DIGITAL_TEXT_ENGINE,
+        engine_version=None,
+        backend="pdftotext",
+        status="success",
+        text=verdict.text,
+        elapsed_ms=verdict.elapsed_ms,
+        confidence=100.0,  # exact digital extraction, not a model estimate
+        metadata={
+            "classification": {
+                "reason": verdict.reason,
+                "char_count": verdict.char_count,
+                "image_count": verdict.image_count,
+                "min_chars": MIN_DIGITAL_TEXT_CHARS,
+            }
+        },
+    )
+    return PageOutcome(
+        page_number=verdict.page_number,
+        selected=result,
+        review=PageReviewFlags(),
+        alterations=None,
     )
 
 

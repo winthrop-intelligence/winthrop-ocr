@@ -88,3 +88,27 @@ class TestVisionPolicy:
         for bad in ("mistral-medium", "mistral-medium-25o5", "pixtral-large"):
             with pytest.raises(ValueError, match="date suffix"):
                 resolve_policy("contracts", overrides={"vision_model": bad})
+
+
+class TestDigitalPagesPolicy:
+    def test_skip_digital_pages_defaults_on_everywhere(self):
+        for profile in ("default", "contracts", "job_postings"):
+            assert resolve_policy(profile).skip_digital_pages is True
+
+    def test_opt_out_override_applies(self):
+        policy = resolve_policy(
+            "contracts", overrides={"skip_digital_pages": False}
+        )
+        assert policy.skip_digital_pages is False
+
+    def test_non_bool_values_are_rejected(self):
+        for bad in ("yes", 1):
+            with pytest.raises(ValueError, match="skip_digital_pages"):
+                resolve_policy("contracts", overrides={"skip_digital_pages": bad})
+
+    def test_override_changes_fingerprint(self):
+        base = resolve_policy("contracts")
+        opted_out = resolve_policy(
+            "contracts", overrides={"skip_digital_pages": False}
+        )
+        assert base.fingerprint() != opted_out.fingerprint()
