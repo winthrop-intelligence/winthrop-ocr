@@ -11,8 +11,11 @@ images from decoration. Any image at all routes the page to OCR — the
 failure direction is an unnecessary OCR call, never lost content.
 
 Classification is fail-safe: every error (missing tool, unreadable or
-password-protected PDF, timeout) downgrades to "send to OCR" and never
-raises past :func:`classify_document`.
+password-protected PDF, timeout, unrecognized pdfimages output) downgrades
+to "send to OCR" and never raises past :func:`classify_document`. The
+whole document runs on two Poppler calls — one ``pdfimages -list`` and one
+``pdftotext`` covering all pages — so pre-flight latency is bounded by two
+subprocess timeouts regardless of page count.
 
 Known limitation (accepted in SCR-2285): purely VECTOR-drawn marks —
 ink/markup annotations or signatures drawn as paths rather than pixels —
@@ -27,13 +30,11 @@ raster anyway. If vector marks show up in practice, harden by counting
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ocr_engine.rendering import POPPLER_MEMORY_LIMIT_BYTES, _stderr_excerpt
+from ocr_engine.rendering import run_poppler
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,15 @@ logger = logging.getLogger(__name__)
 # DocuSign envelope stamps run ~40-80 chars; real contract pages 300+.
 MIN_DIGITAL_TEXT_CHARS = 120
 
-# pdfimages -list scans the whole document once; pdftotext extracts one page.
+# Each tool scans the whole document exactly once per classification.
 PDFIMAGES_LIST_TIMEOUT_SECONDS = 60
-PDFTOTEXT_PAGE_TIMEOUT_SECONDS = 20
+PDFTOTEXT_DOCUMENT_TIMEOUT_SECONDS = 120
 
-# pdfimages -list "type" values that count as an embedded image. 'stencil'
-# covers 1-bit stamp/signature masks; smask/mask rows always accompany a
-# parent image row, so ignoring them loses nothing.
-IMAGE_ROW_TYPES = frozenset({"image", "stencil"})
+# pdfimages -list "type" values that do NOT count as an image: soft masks
+# and stencil masks always accompany the parent image row they shape.
+# Every other type (image, stencil, or anything a future Poppler adds)
+# counts as an image — unknown content must route to OCR, never skip it.
+NON_IMAGE_ROW_TYPES = frozenset({"smask", "mask"})
 
 # Engine name recorded on skipped pages (surfaces in summary()["engines_used"]).
 DIGITAL_TEXT_ENGINE = "digital-text"
@@ -61,11 +63,11 @@ class PageClassification:
 
     page_number: int
     is_digital: bool
-    text: str = ""  # pdftotext output (trailing form-feed stripped); "" unless digital
+    text: str = ""  # pdftotext output for the page; "" unless digital
     reason: str = ""  # "digital-text" | "has-images" | "sparse-text" | "classification-error"
     char_count: int = 0  # non-whitespace chars seen by pdftotext
     image_count: int = 0  # pdfimages rows on this page
-    elapsed_ms: int = 0  # this page's pdftotext time (0 when pdftotext never ran)
+    elapsed_ms: int = 0  # this page's share of the document's pdftotext time
 
 
 def classify_document(
@@ -73,12 +75,23 @@ def classify_document(
 ) -> dict[int, PageClassification]:
     """Classify every page of a PDF; never raises.
 
-    Any document-level failure yields needs-OCR verdicts for all pages;
-    a page-level failure downgrades only that page.
+    Any failure — either Poppler call, or output that does not parse
+    cleanly — yields needs-OCR verdicts for every page.
     """
 
     try:
         image_counts = _pdfimages_page_counts(pdf_path)
+        image_free = [
+            number
+            for number in range(1, page_count + 1)
+            if image_counts.get(number, 0) == 0
+        ]
+        if image_free:
+            started = time.monotonic()
+            page_texts = _document_page_texts(pdf_path, page_count)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+        else:
+            page_texts, elapsed_ms = [], 0
     except Exception as exc:
         logger.warning(
             "digital-page classification failed for %s; all pages go to OCR: %s",
@@ -92,6 +105,10 @@ def classify_document(
             for number in range(1, page_count + 1)
         }
 
+    # summary()["elapsed_ms"] sums per-page times, so the single pdftotext
+    # call's cost is spread across the pages it served, not repeated.
+    elapsed_share = elapsed_ms // len(image_free) if image_free else 0
+
     verdicts: dict[int, PageClassification] = {}
     for number in range(1, page_count + 1):
         count = image_counts.get(number, 0)
@@ -100,22 +117,7 @@ def classify_document(
                 number, is_digital=False, reason="has-images", image_count=count
             )
             continue
-        try:
-            started = time.monotonic()
-            text = _page_text(pdf_path, number)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-        except Exception as exc:
-            logger.warning(
-                "digital-page classification failed for %s page %d; page goes "
-                "to OCR: %s",
-                pdf_path.name,
-                number,
-                exc,
-            )
-            verdicts[number] = PageClassification(
-                number, is_digital=False, reason="classification-error"
-            )
-            continue
+        text = page_texts[number - 1]
         chars = sum(1 for ch in text if not ch.isspace())
         if chars >= MIN_DIGITAL_TEXT_CHARS:
             verdicts[number] = PageClassification(
@@ -124,7 +126,7 @@ def classify_document(
                 text=text,
                 reason="digital-text",
                 char_count=chars,
-                elapsed_ms=elapsed_ms,
+                elapsed_ms=elapsed_share,
             )
         else:
             verdicts[number] = PageClassification(
@@ -132,7 +134,7 @@ def classify_document(
                 is_digital=False,
                 reason="sparse-text",
                 char_count=chars,
-                elapsed_ms=elapsed_ms,
+                elapsed_ms=elapsed_share,
             )
 
     digital = sum(1 for verdict in verdicts.values() if verdict.is_digital)
@@ -148,34 +150,11 @@ def classify_document(
 def _pdfimages_page_counts(pdf_path: Path) -> dict[int, int]:
     """Count embedded raster images per page via pdfimages (memory-capped)."""
 
-    # pylint: disable-next=import-outside-toplevel
-    from ocr_engine.adapters import subprocess_runner
-
-    command = [
-        sys.executable,
-        "-m",
-        "ocr_engine.adapters.subprocess_runner",
-        "--memory-limit-bytes",
-        str(POPPLER_MEMORY_LIMIT_BYTES),
-        "--",
-        "pdfimages",
-        "-list",
-        str(pdf_path),
-    ]
-    try:
-        output = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=PDFIMAGES_LIST_TIMEOUT_SECONDS,
-        ).stdout
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
-            raise RuntimeError("pdfimages is required; install Poppler") from exc
-        raise ValueError(
-            f"pdfimages could not read {pdf_path.name} ({_stderr_excerpt(exc)})"
-        ) from exc
+    output = run_poppler(
+        ["pdfimages", "-list", str(pdf_path)],
+        timeout=PDFIMAGES_LIST_TIMEOUT_SECONDS,
+        failure=f"pdfimages could not read {pdf_path.name}",
+    ).decode("utf-8", errors="replace")
     return _parse_pdfimages_list(output)
 
 
@@ -183,58 +162,63 @@ def _parse_pdfimages_list(output: str) -> dict[int, int]:
     """Parse ``pdfimages -list`` output into per-page image counts.
 
     Format: a column-header line, a dashed rule, then one whitespace-
-    separated row per image. Unrecognized lines are skipped defensively.
+    separated row per image. The header and every data row are validated —
+    a page with images MUST end up with a non-zero count, so anything
+    unrecognized raises (and the caller's fail-safe routes all pages to
+    OCR) rather than being silently dropped as "no images".
     """
 
+    lines = output.splitlines()
+    if len(lines) < 2:
+        raise ValueError("unrecognized pdfimages -list output: missing header")
+    header = lines[0].split()
+    if header[:3] != ["page", "num", "type"]:
+        raise ValueError(
+            f"unrecognized pdfimages -list header: {lines[0].strip()[:80]!r}"
+        )
+    rule = lines[1].strip()
+    if not rule or set(rule) != {"-"}:
+        raise ValueError(
+            f"unrecognized pdfimages -list rule line: {rule[:80]!r}"
+        )
     counts: dict[int, int] = {}
-    for line in output.splitlines()[2:]:
+    for line in lines[2:]:
+        if not line.strip():
+            continue
         fields = line.split()
         if len(fields) < 3 or not fields[0].isdigit():
-            continue
-        if fields[2] in IMAGE_ROW_TYPES:
+            raise ValueError(
+                f"unrecognized pdfimages -list row: {line.strip()[:80]!r}"
+            )
+        if fields[2] not in NON_IMAGE_ROW_TYPES:
             page = int(fields[0])
             counts[page] = counts.get(page, 0) + 1
     return counts
 
 
-def _page_text(pdf_path: Path, page_number: int) -> str:
-    """Extract one page's embedded digital text via pdftotext (memory-capped)."""
+def _document_page_texts(pdf_path: Path, page_count: int) -> list[str]:
+    """Extract every page's embedded text in ONE pdftotext call.
 
-    # pylint: disable-next=import-outside-toplevel
-    from ocr_engine.adapters import subprocess_runner
+    pdftotext ends each page with a form-feed, so the document splits into
+    exactly ``page_count`` texts plus one empty trailing segment. Any other
+    shape is ambiguous — per-page attribution could be wrong — so it raises
+    and the caller's fail-safe routes all pages to OCR.
+    """
 
-    command = [
-        sys.executable,
-        "-m",
-        "ocr_engine.adapters.subprocess_runner",
-        "--memory-limit-bytes",
-        str(POPPLER_MEMORY_LIMIT_BYTES),
-        "--",
-        "pdftotext",
-        "-f",
-        str(page_number),
-        "-l",
-        str(page_number),
-        "-enc",
-        "UTF-8",
-        str(pdf_path),
-        "-",
-    ]
-    try:
-        raw = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            timeout=PDFTOTEXT_PAGE_TIMEOUT_SECONDS,
-        ).stdout
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
-            raise RuntimeError("pdftotext is required; install Poppler") from exc
+    raw = run_poppler(
+        ["pdftotext", "-enc", "UTF-8", str(pdf_path), "-"],
+        timeout=PDFTOTEXT_DOCUMENT_TIMEOUT_SECONDS,
+        failure=f"pdftotext could not read {pdf_path.name}",
+    )
+    segments = raw.decode("utf-8", errors="replace").split("\f")
+    if segments[-1] != "":
         raise ValueError(
-            f"pdftotext could not read {pdf_path.name} page {page_number} "
-            f"({_stderr_excerpt(exc)})"
-        ) from exc
-    text = raw.decode("utf-8", errors="replace")
-    # pdftotext ends every page with a form-feed; OcrDocumentResult.text
-    # joins pages with form-feed too, so keeping it would double-separate.
-    return text.removesuffix("\f")
+            f"pdftotext output for {pdf_path.name} did not end with a form-feed"
+        )
+    pages = segments[:-1]
+    if len(pages) != page_count:
+        raise ValueError(
+            f"pdftotext returned {len(pages)} page(s) for {pdf_path.name}, "
+            f"expected {page_count}"
+        )
+    return pages

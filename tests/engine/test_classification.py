@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from ocr_engine import classification
 from ocr_engine.classification import (
     MIN_DIGITAL_TEXT_CHARS,
+    _document_page_texts,
     _parse_pdfimages_list,
     classify_document,
 )
@@ -102,27 +105,79 @@ class TestClassifyDocument:
         assert verdicts[2].char_count == MIN_DIGITAL_TEXT_CHARS - 1
 
 
+PDFIMAGES_HEADER = (
+    "page num type width height color comp bpc enc interp object ID"
+    " x-ppi y-ppi size ratio"
+)
+PDFIMAGES_RULE = "-" * 85
+
+
 class TestParsePdfimagesList:
-    def test_counts_image_and_stencil_rows_only(self):
+    def test_counts_rows_per_page_ignoring_masks(self):
         output = "\n".join(
             [
-                "page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio",
-                "-------------------------------------------------------------------------------------",
+                PDFIMAGES_HEADER,
+                PDFIMAGES_RULE,
                 "   1   0 image    2550  3300 gray    1   8 jpeg  no    26  0   300   300  180K  6.7%",
                 "   1   1 smask    2550  3300 gray    1   8 image no    27  0   300   300  120K  4.4%",
                 "   3   2 stencil     1     1 -       1   1 image no    28  0   469   469     3B 100%",
                 "",
-                "garbage line that should be ignored",
             ]
         )
         assert _parse_pdfimages_list(output) == {1: 1, 3: 1}
 
-    def test_empty_document_has_no_counts(self):
-        header_only = (
-            "page num type width height color comp bpc enc interp object ID"
-            " x-ppi y-ppi size ratio\n---\n"
+    def test_unknown_row_type_counts_as_an_image(self):
+        # Unknown content must route to OCR, never be dropped as "no image".
+        output = "\n".join(
+            [
+                PDFIMAGES_HEADER,
+                PDFIMAGES_RULE,
+                "   2   0 newtype     10    10 rgb    3   8 jpeg  no    26  0   300   300    1K  1.0%",
+            ]
         )
-        assert _parse_pdfimages_list(header_only) == {}
+        assert _parse_pdfimages_list(output) == {2: 1}
+
+    def test_empty_document_has_no_counts(self):
+        assert (
+            _parse_pdfimages_list(f"{PDFIMAGES_HEADER}\n{PDFIMAGES_RULE}\n") == {}
+        )
+
+    def test_garbage_data_row_raises(self):
+        # A silently dropped row could hide an image-bearing page, letting
+        # it classify as digital — ambiguity must fail (to OCR), not pass.
+        output = "\n".join(
+            [PDFIMAGES_HEADER, PDFIMAGES_RULE, "garbage that is not a row"]
+        )
+        with pytest.raises(ValueError, match="row"):
+            _parse_pdfimages_list(output)
+
+    def test_unrecognized_header_raises(self):
+        with pytest.raises(ValueError, match="header"):
+            _parse_pdfimages_list("something entirely different\n-----\n")
+
+    def test_missing_output_raises(self):
+        with pytest.raises(ValueError, match="header"):
+            _parse_pdfimages_list("")
+
+
+class TestDocumentPageTexts:
+    def test_page_count_mismatch_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            classification,
+            "run_poppler",
+            lambda *_args, **_kwargs: b"page one\fpage two\f",
+        )
+        with pytest.raises(ValueError, match="expected 3"):
+            _document_page_texts(tmp_path / "doc.pdf", 3)
+
+    def test_output_without_trailing_form_feed_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            classification,
+            "run_poppler",
+            lambda *_args, **_kwargs: b"page one without terminator",
+        )
+        with pytest.raises(ValueError, match="form-feed"):
+            _document_page_texts(tmp_path / "doc.pdf", 1)
 
 
 class TestFailSafe:
@@ -142,22 +197,25 @@ class TestFailSafe:
             assert not verdict.is_digital
             assert verdict.reason == "classification-error"
 
-    def test_pdftotext_timeout_marks_only_that_page(self, tmp_path, monkeypatch):
+    def test_pdftotext_failure_marks_all_pages_needs_ocr(
+        self, tmp_path, monkeypatch
+    ):
+        # The single document-wide pdftotext call is all-or-nothing: on any
+        # failure, per-page attribution would be guesswork, so every page
+        # falls back to OCR.
         monkeypatch.setattr(
             classification, "_pdfimages_page_counts", lambda _pdf_path: {}
         )
 
-        def flaky(_pdf_path, page_number):
-            if page_number == 1:
-                raise subprocess.TimeoutExpired(cmd="pdftotext", timeout=20)
-            return DIGITAL_PAGE_TEXT
+        def timeout(_pdf_path, _page_count):
+            raise subprocess.TimeoutExpired(cmd="pdftotext", timeout=120)
 
-        monkeypatch.setattr(classification, "_page_text", flaky)
+        monkeypatch.setattr(classification, "_document_page_texts", timeout)
         verdicts = classify_document(tmp_path / "doc.pdf", 2)
 
-        assert not verdicts[1].is_digital
-        assert verdicts[1].reason == "classification-error"
-        assert verdicts[2].is_digital
+        for verdict in verdicts.values():
+            assert not verdict.is_digital
+            assert verdict.reason == "classification-error"
 
     def test_missing_pdfimages_binary_is_fail_safe(self, tmp_path, monkeypatch):
         def missing(_pdf_path):

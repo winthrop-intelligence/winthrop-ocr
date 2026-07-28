@@ -266,6 +266,34 @@ class TestDigitalPages:
         ocr_document(image)
         assert fake_registry.calls == [1]
 
+    def test_fully_digital_document_needs_no_engine(self, tmp_path, monkeypatch):
+        """A document that makes no OCR call must not demand OCR credentials."""
+
+        class UnavailableEngine(FakeEngine):
+            @classmethod
+            def availability(cls):
+                return False, "MISTRAL_API_KEY is not set"
+
+        engine = UnavailableEngine("mistral")
+        monkeypatch.setattr(document, "engine_registry", lambda: {"mistral": engine})
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT]
+        )
+        result = ocr_document(pdf)  # must not raise
+
+        assert engine.calls == []
+        assert result.summary()["digital_pages"] == 2
+
+        # One OCR-bound page brings the availability requirement back.
+        mixed = build_digital_pdf(
+            tmp_path / "mixed.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            image_on_pages={2},
+        )
+        with pytest.raises(OcrDocumentError, match="MISTRAL_API_KEY"):
+            ocr_document(mixed)
+        assert engine.calls == []
+
 
 class TestVision:
     @staticmethod

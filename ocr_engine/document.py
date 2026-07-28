@@ -102,7 +102,10 @@ def ocr_document(
       renders its own page and deletes the image right after OCR.
     - runtime_check: optional zero-arg callable invoked from the calling
       thread at least every ``RUNTIME_CHECK_INTERVAL_SECONDS`` while pages
-      are in flight (keeps callers' runtime alerting alive). If it raises,
+      are in flight (keeps callers' runtime alerting alive). It does not
+      fire during pre-flight digital-page classification, which is bounded
+      by two subprocess timeouts (~3 minutes worst case) regardless of
+      page count. If it raises,
       its exception propagates UNWRAPPED (it is the caller's own signal,
       not an OCR failure); no further pages are submitted, but pages
       already in flight finish first — each bounded by the larger of the
@@ -112,7 +115,10 @@ def ocr_document(
       long to surface.
 
     Returns an :class:`OcrDocumentResult` with pages in order; ``.text``
-    joins pages with form-feed. Raises :class:`OcrDocumentError` when the
+    joins pages with form-feed. A fully digital PDF (every page skips OCR)
+    requires neither the OCR engine's credentials nor ``pdftoppm`` — those
+    dependencies are checked only when at least one page takes the
+    render+OCR path. Raises :class:`OcrDocumentError` when the
     source is unusable, the engine is unavailable, or ANY page fails —
     partial documents are never returned, so callers can treat a return
     value as complete. Once a document is doomed, still-queued pages are
@@ -134,18 +140,9 @@ def ocr_document(
     engine = engines.get(policy.engine)
     if engine is None:
         raise OcrDocumentError(f"no engine registered as {policy.engine!r}")
-    available, diagnostic = engine.availability()
-    if not available:
-        raise OcrDocumentError(
-            f"OCR engine {policy.engine!r} is not available: {diagnostic}"
-        )
 
     is_pdf = _is_pdf(source)
     if is_pdf:
-        if shutil.which("pdftoppm") is None:
-            raise OcrDocumentError(
-                "poppler-utils is not installed (pdftoppm not found)"
-            )
         try:
             page_count = pdf_page_count(source)
         except Exception as exc:
@@ -166,6 +163,11 @@ def ocr_document(
     digital_count = sum(
         1 for verdict in classifications.values() if verdict.is_digital
     )
+    # A fully digital document makes no engine or render call, so it needs
+    # neither the OCR engine nor pdftoppm — require them only when at
+    # least one page actually takes the render+OCR path.
+    if digital_count < page_count:
+        _require_ocr_capability(engine, policy.engine, is_pdf)
 
     with tempfile.TemporaryDirectory(prefix="ocr-doc-") as temp_dir:
         pages_dir = Path(temp_dir)
@@ -233,6 +235,22 @@ def _preflight_classifications(
     if not (is_pdf and policy.skip_digital_pages):
         return {}
     return classify_document(source, page_count)
+
+
+def _require_ocr_capability(
+    engine: Any, engine_name: str, is_pdf: bool
+) -> None:
+    """Raise unless the render+OCR path's dependencies are usable."""
+
+    available, diagnostic = engine.availability()
+    if not available:
+        raise OcrDocumentError(
+            f"OCR engine {engine_name!r} is not available: {diagnostic}"
+        )
+    if is_pdf and shutil.which("pdftoppm") is None:
+        raise OcrDocumentError(
+            "poppler-utils is not installed (pdftoppm not found)"
+        )
 
 
 def _digital_page_outcome(

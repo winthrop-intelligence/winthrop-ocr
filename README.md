@@ -140,9 +140,13 @@ result.summary()["digital_pages"]
 ```
 
 Classification **fail-safes to OCR**: any error (unreadable PDF, missing
-tool, timeout) sends the page through the normal render+OCR path and never
-fails the document. The worst failure mode is an unnecessary OCR call —
-never lost content. Opt out per-run with
+tool, timeout, unrecognized Poppler output) sends the page through the
+normal render+OCR path and never fails the document. The worst failure
+mode is an unnecessary OCR call — never lost content. Classification costs
+two subprocess calls per document (one `pdfimages -list`, one `pdftotext`)
+regardless of page count, and a **fully digital document requires neither
+`MISTRAL_API_KEY` nor `pdftoppm`** — OCR dependencies are checked only
+when at least one page actually needs OCR. Opt out per-run with
 `overrides={"skip_digital_pages": False}`. Single-image sources are never
 classified (PDF-only). Known limitation: purely vector-drawn marks
 (annotation ink, path-drawn signatures) are invisible to `pdfimages` and
