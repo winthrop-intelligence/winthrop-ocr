@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
-POLICY_VERSION = "2026-07-27"
+POLICY_VERSION = "2026-07-28"
 
 DPI_MIN, DPI_MAX = 72, 600
 
@@ -31,6 +31,10 @@ class OcrPolicy:
     # upgrades and price changes (mistral-medium-latest resolves to 3.5).
     vision_enabled: bool = True
     vision_model: str = "mistral-medium-2505"
+    # Born-digital pages (>= 120 non-whitespace pdftotext chars AND zero
+    # embedded raster images) skip the render+OCR path and return their
+    # exact digital text. Classification errors always fall back to OCR.
+    skip_digital_pages: bool = True
 
     def fingerprint(self) -> str:
         """Stable hash of the fully resolved policy, including POLICY_VERSION.
@@ -56,6 +60,10 @@ class OcrPolicy:
         if not isinstance(self.vision_enabled, bool):
             raise ValueError(
                 f"vision_enabled must be a boolean, got {self.vision_enabled!r}"
+            )
+        if not isinstance(self.skip_digital_pages, bool):
+            raise ValueError(
+                f"skip_digital_pages must be a boolean, got {self.skip_digital_pages!r}"
             )
         if not isinstance(self.vision_model, str) or not self.vision_model:
             raise ValueError(

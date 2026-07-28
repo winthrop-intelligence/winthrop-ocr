@@ -7,7 +7,13 @@ import pytest
 from ocr_engine import document
 from ocr_engine.document import OcrDocumentError, ocr_document
 
-from tests.conftest import FakeEngine, build_pdf, draw_text_like_page
+from tests.conftest import (
+    DIGITAL_PAGE_TEXT,
+    FakeEngine,
+    build_digital_pdf,
+    build_pdf,
+    draw_text_like_page,
+)
 
 
 @pytest.fixture(name="fake_registry")
@@ -142,6 +148,176 @@ class TestSuccess:
         summary = result.summary()
         assert summary["signature_pages"] == 1
         assert summary["handwriting_pages"] == 1
+
+
+class TestDigitalPages:
+    def test_digital_pdf_skips_the_engine_entirely(self, tmp_path, fake_registry):
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT]
+        )
+        result = ocr_document(pdf, profile="contracts")
+
+        assert fake_registry.calls == []
+        for outcome in result.pages:
+            selected = outcome.selected
+            assert selected.engine == "digital-text"
+            assert selected.backend == "pdftotext"
+            assert selected.status == "success"
+            assert selected.confidence == 100.0
+            assert selected.metadata["classification"]["reason"] == "digital-text"
+            assert not outcome.review.signature_page
+            assert not outcome.review.handwriting_suspected
+            assert outcome.alterations is None
+        # Two pages, one form-feed separator — no double separators from
+        # pdftotext's own trailing form-feed.
+        assert result.text.count("\f") == 1
+        assert result.text.count("Employment Agreement") == 2
+        summary = result.summary()
+        assert summary["digital_pages"] == 2
+        assert summary["engines_used"] == {"digital-text": 2}
+        assert summary["digital_page_numbers"] == [1, 2]
+        assert summary["ocr_page_numbers"] == []
+        assert summary["pages_failed"] == 0
+
+    def test_mixed_document_routes_only_image_pages_to_engine(
+        self, tmp_path, fake_registry
+    ):
+        pdf = build_digital_pdf(
+            tmp_path / "mixed.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            image_on_pages={2},
+        )
+        result = ocr_document(pdf, profile="contracts")
+
+        assert fake_registry.calls == [2]
+        by_page = {outcome.page_number: outcome.selected for outcome in result.pages}
+        assert by_page[1].engine == "digital-text"
+        assert by_page[2].engine == "mistral"
+        # OCR-routed pages carry the routing reason for consumers' metrics.
+        assert by_page[2].metadata["classification"]["reason"] == "has-images"
+        summary = result.summary()
+        assert summary["digital_pages"] == 1
+        assert summary["engines_used"] == {"digital-text": 1, "mistral": 1}
+        assert summary["digital_page_numbers"] == [1]
+        assert summary["ocr_page_numbers"] == [2]
+
+    def test_vision_never_runs_for_digital_pages(
+        self, tmp_path, fake_registry, monkeypatch
+    ):
+        calls = TestVision.install_detector(monkeypatch, lambda _n: None)
+        pdf = build_digital_pdf(
+            tmp_path / "mixed.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            image_on_pages={2},
+        )
+        result = ocr_document(pdf, profile="contracts")
+
+        assert calls == [2]
+        by_page = {outcome.page_number: outcome for outcome in result.pages}
+        assert by_page[1].alterations is None
+
+    def test_skip_digital_pages_opt_out_forces_ocr(self, tmp_path, fake_registry):
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT]
+        )
+        result = ocr_document(pdf, overrides={"skip_digital_pages": False})
+
+        assert sorted(fake_registry.calls) == [1, 2]
+        assert all(
+            outcome.selected.engine == "mistral" for outcome in result.pages
+        )
+        assert result.summary()["digital_pages"] == 0
+        baseline = ocr_document(pdf)
+        assert result.policy_fingerprint != baseline.policy_fingerprint
+
+    def test_vector_marked_page_goes_to_ocr(self, tmp_path, fake_registry):
+        # Text-rich page with a stylus-signature stand-in drawn as vector
+        # paths: no raster image, but the pdfplumber gate routes it to OCR.
+        pdf = build_digital_pdf(
+            tmp_path / "vector.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            curve_on_pages={2},
+        )
+        result = ocr_document(pdf)
+
+        assert fake_registry.calls == [2]
+        by_page = {outcome.page_number: outcome.selected for outcome in result.pages}
+        assert by_page[1].engine == "digital-text"
+        assert by_page[2].engine == "mistral"
+        assert (
+            by_page[2].metadata["classification"]["reason"] == "has-vector-marks"
+        )
+
+    def test_stamp_only_page_still_goes_to_ocr(self, tmp_path, fake_registry):
+        # The SCR-2285 trap: a scanned-page stand-in whose only digital text
+        # is a short DocuSign stamp must not be skipped.
+        pdf = build_digital_pdf(
+            tmp_path / "stamp.pdf",
+            ["DocuSign Envelope ID: 4C1AB2F8-0D3E-4B5A-9C87-1F2E3D4C5B6A"],
+        )
+        ocr_document(pdf)
+        assert fake_registry.calls == [1]
+
+    def test_classification_failure_falls_back_to_ocr(
+        self, tmp_path, fake_registry, monkeypatch
+    ):
+        from ocr_engine.classification import PageClassification
+
+        def broken(_pdf_path, page_count):
+            return {
+                number: PageClassification(
+                    number, is_digital=False, reason="classification-error"
+                )
+                for number in range(1, page_count + 1)
+            }
+
+        monkeypatch.setattr(document, "classify_document", broken)
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT]
+        )
+        result = ocr_document(pdf)  # must not raise
+
+        assert sorted(fake_registry.calls) == [1, 2]
+        assert result.summary()["pages_failed"] == 0
+
+    def test_single_image_source_never_classifies(
+        self, tmp_path, fake_registry, monkeypatch
+    ):
+        def fail(*_args, **_kwargs):
+            pytest.fail("classify_document must not run for non-PDF sources")
+
+        monkeypatch.setattr(document, "classify_document", fail)
+        image = draw_text_like_page(tmp_path / "scan.png")
+        ocr_document(image)
+        assert fake_registry.calls == [1]
+
+    def test_fully_digital_document_needs_no_engine(self, tmp_path, monkeypatch):
+        """A document that makes no OCR call must not demand OCR credentials."""
+
+        class UnavailableEngine(FakeEngine):
+            @classmethod
+            def availability(cls):
+                return False, "MISTRAL_API_KEY is not set"
+
+        engine = UnavailableEngine("mistral")
+        monkeypatch.setattr(document, "engine_registry", lambda: {"mistral": engine})
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT]
+        )
+        result = ocr_document(pdf)  # must not raise
+
+        assert engine.calls == []
+        assert result.summary()["digital_pages"] == 2
+
+        # One OCR-bound page brings the availability requirement back.
+        mixed = build_digital_pdf(
+            tmp_path / "mixed.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            image_on_pages={2},
+        )
+        with pytest.raises(OcrDocumentError, match="MISTRAL_API_KEY"):
+            ocr_document(mixed)
+        assert engine.calls == []
 
 
 class TestVision:

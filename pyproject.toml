@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "winthrop-ocr"
-version = "0.3.0"
+version = "0.4.0"
 description = "OCR library: render PDF pages and extract text with per-page confidence via Mistral OCR"
 authors = ["Winthrop Intelligence"]
 readme = "README.md"
@@ -14,6 +14,7 @@ Pillow = ">=11.0,<13"
 # Core, not an extra: the only built-in engine is Mistral, so a bare install
 # without the SDK would fail every call at runtime.
 mistralai = ">=2,<3"
+pdfplumber = ">=0.11,<0.13"
 
 [tool.poetry.extras]
 # Historical alias so `extras = ["mistral"]` install lines keep working.

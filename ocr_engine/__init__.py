@@ -12,6 +12,7 @@ Submodule paths are internal layout and may move between minor versions.
 
 import logging
 
+from ocr_engine.classification import DIGITAL_TEXT_ENGINE
 from ocr_engine.document import OcrDocumentError, ocr_document
 from ocr_engine.models import OCRResult, PageAlterations
 from ocr_engine.policy import POLICY_VERSION, OcrPolicy, resolve_policy
@@ -19,6 +20,7 @@ from ocr_engine.review import PageReviewFlags, detect_review_flags
 from ocr_engine.runner import OcrDocumentResult, PageOutcome
 
 __all__ = [
+    "DIGITAL_TEXT_ENGINE",
     "OCRResult",
     "OcrDocumentError",
     "OcrDocumentResult",

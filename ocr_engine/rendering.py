@@ -6,6 +6,7 @@ import hashlib
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from ocr_engine.models import PageInput
@@ -50,12 +51,27 @@ def document_id(path: Path) -> str:
     return f"{safe_stem}-{sha256_file(path)[:10]}"
 
 
-def pdf_page_count(pdf_path: Path) -> int:
-    """Read the PDF page count using Poppler's pdfinfo (memory-capped)."""
+def run_sandboxed(
+    arguments: Sequence[str],
+    *,
+    timeout: int,
+    failure: str,
+    install_hint: str = "install Poppler",
+) -> bytes:
+    """Run one external tool under the memory cap; return its stdout bytes.
+
+    The canonical process adapter for every tool that decodes untrusted
+    PDFs — the Poppler CLI (pdfinfo, pdftoppm, pdfimages, pdftotext) and
+    the pdfplumber vector scan: one command assembly, one error
+    normalization. Exit code 127 (tool missing) raises ``RuntimeError``
+    naming the tool plus ``install_hint``; any other failure raises
+    ``ValueError`` built from ``failure`` plus the stderr tail.
+    """
 
     # pylint: disable-next=import-outside-toplevel
     from ocr_engine.adapters import subprocess_runner
 
+    tool = arguments[0]
     command = [
         sys.executable,
         "-m",
@@ -63,23 +79,26 @@ def pdf_page_count(pdf_path: Path) -> int:
         "--memory-limit-bytes",
         str(POPPLER_MEMORY_LIMIT_BYTES),
         "--",
-        "pdfinfo",
-        str(pdf_path),
+        *arguments,
     ]
     try:
-        output = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        return subprocess.run(
+            command, check=True, capture_output=True, timeout=timeout
         ).stdout
     except subprocess.CalledProcessError as exc:
         if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
-            raise RuntimeError("pdfinfo is required; install Poppler") from exc
-        raise ValueError(
-            f"pdfinfo could not read {pdf_path.name} ({_stderr_excerpt(exc)})"
-        ) from exc
+            raise RuntimeError(f"{tool} is required; {install_hint}") from exc
+        raise ValueError(f"{failure} ({_stderr_excerpt(exc)})") from exc
+
+
+def pdf_page_count(pdf_path: Path) -> int:
+    """Read the PDF page count using Poppler's pdfinfo (memory-capped)."""
+
+    output = run_sandboxed(
+        ["pdfinfo", str(pdf_path)],
+        timeout=30,
+        failure=f"pdfinfo could not read {pdf_path.name}",
+    ).decode("utf-8", errors="replace")
     match = re.search(r"^Pages:\s+(\d+)\s*$", output, flags=re.MULTILINE)
     if not match:
         raise ValueError(f"could not read page count from {pdf_path}")
@@ -91,37 +110,24 @@ def render_pdf_page(
 ) -> None:
     """Render one PDF page to a stable RGB PNG via memory-bounded pdftoppm."""
 
-    # pylint: disable-next=import-outside-toplevel
-    from ocr_engine.adapters import subprocess_runner
-
     prefix = output_path.with_suffix("")
-    command = [
-        sys.executable,
-        "-m",
-        "ocr_engine.adapters.subprocess_runner",
-        "--memory-limit-bytes",
-        str(POPPLER_MEMORY_LIMIT_BYTES),
-        "--",
-        "pdftoppm",
-        "-f",
-        str(page_number),
-        "-l",
-        str(page_number),
-        "-r",
-        str(dpi),
-        "-png",
-        "-singlefile",
-        str(pdf_path),
-        str(prefix),
-    ]
-    try:
-        subprocess.run(command, check=True, capture_output=True, timeout=120)
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
-            raise RuntimeError("pdftoppm is required; install Poppler") from exc
-        raise RuntimeError(
-            f"pdftoppm failed on page {page_number} ({_stderr_excerpt(exc)})"
-        ) from exc
+    run_sandboxed(
+        [
+            "pdftoppm",
+            "-f",
+            str(page_number),
+            "-l",
+            str(page_number),
+            "-r",
+            str(dpi),
+            "-png",
+            "-singlefile",
+            str(pdf_path),
+            str(prefix),
+        ],
+        timeout=120,
+        failure=f"pdftoppm failed on page {page_number}",
+    )
 
 
 def render_page_input(
