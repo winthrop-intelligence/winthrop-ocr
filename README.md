@@ -97,13 +97,19 @@ for page in result.pages:
 result.summary()["alteration_pages"], result.summary()["vision_failed_pages"]
 ```
 
-**The verdict is flag-only by design.** Benchmarked on a 1,386-page
-held-out corpus (game, employment, vendor, and financial documents) plus
-user-confirmed altered contracts: 100% detection recall with a ~9% page
-flag rate. The prompt is evidence-grounded — the model must inventory the
-physical marks it sees and may only report alterations backed by pen
-handwriting or strike-through marks — which suppresses false flags from
-e-signature fonts, typed form fill-ins, and scanner noise. The model
+**The verdict is flag-only by design.** Benchmark (July 2026), with
+denominators: detection recall was 5/5 on the confirmed hand-altered
+pages available (from 3 user-verified contracts; a 4th genuinely altered
+contract was discovered during evaluation and is also flagged). The flag
+rate was 124 of 1,386 pages (~9%) across a held-out corpus of 133 real
+game, employment, vendor, and financial documents with no known
+alterations — an upper bound on the false-positive rate, since sampled
+adjudication showed most (not all) of those flags were false. These are
+corpus-specific measurements, not detection guarantees. The prompt is
+evidence-grounded — the model must inventory the physical marks it sees
+and may only report alterations backed by pen handwriting or
+strike-through marks — which suppresses false flags from e-signature
+fonts, typed form fill-ins, and scanner noise. The model
 dependably identifies which page/clause was altered but routinely misread
 the struck and replacement values — so values are neither requested nor
 accepted (entries carry only `clause` and `kind`). Route flagged pages to
