@@ -66,6 +66,7 @@ def build_digital_pdf(
     image_on_pages: Collection[int] = (),
     curve_on_pages: Collection[int] = (),
     ink_annot_on_pages: Collection[int] = (),
+    extra_content_on_pages: dict[int, str] | None = None,
 ) -> Path:
     """Hand-assemble a born-digital PDF: real text objects, no raster pages.
 
@@ -78,6 +79,8 @@ def build_digital_pdf(
     - ``curve_on_pages``: stroke a bezier squiggle (a stylus-signature
       stand-in) — invisible to pdfimages, visible to pdfplumber.
     - ``ink_annot_on_pages``: attach an /Ink markup annotation.
+    - ``extra_content_on_pages``: raw content-stream operators appended to
+      a page (e.g. line/rect strokes for vector-gate tests).
     Parses with real Poppler.
     """
 
@@ -142,6 +145,9 @@ def build_digital_pdf(
             ops.append("q 40 0 0 40 500 706 cm /Im1 Do Q")
         if page_number in curve_pages:
             ops.append("1 w 100 200 m 120 240 140 160 160 200 c S")
+        extra = (extra_content_on_pages or {}).get(page_number)
+        if extra:
+            ops.append(extra)
         stream = "\n".join(ops).encode("latin-1")
         objects.append(
             b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)

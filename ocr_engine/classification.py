@@ -14,12 +14,14 @@ failure direction is an unnecessary OCR call, never lost content.
 
 The vector-mark gate runs LAST and only for pages that would otherwise be
 skipped, so scanned documents never pay its cost. It counts curves (drawn
-handwriting is made of curves) and markup annotations (Ink, Stamp, ...),
-while straight lines and rectangles — table borders and rules present on
-virtually every contract — stay benign. Residual gap, accepted: a mark
-composed purely of straight segments with no annotation entry would not
-be flagged; zero pages in the 281 validated contract pages carried vector
-marks of any kind.
+handwriting is made of curves), diagonal straight lines (a drawn "X" or
+check mark; document layout is axis-aligned), and markup annotations
+(Ink, Stamp, ...), while axis-aligned lines and rectangles — table
+borders and rules present on 57% of legitimately skippable real contract
+pages — stay benign. Residual gap, accepted: a mark that is purely
+horizontal or vertical (e.g. a strikethrough drawn as a plain line) is
+indistinguishable from an underline without rendering the page and is
+not flagged.
 
 Classification is fail-safe: every error (missing tool, unreadable or
 password-protected PDF, timeout, unrecognized tool output) downgrades to
@@ -292,6 +294,7 @@ def _vector_mark_counts(pdf_path: Path, page_numbers: list[int]) -> dict[int, in
         )
     return {
         number: counts[str(number)]["curves"]
+        + counts[str(number)]["diagonal_lines"]
         + counts[str(number)]["markup_annots"]
         for number in page_numbers
     }

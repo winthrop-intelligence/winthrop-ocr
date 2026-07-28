@@ -204,6 +204,37 @@ class TestVectorMarks:
         assert not verdict.is_digital
         assert verdict.reason == "has-vector-marks"
 
+    def test_diagonal_line_page_needs_ocr(self, tmp_path):
+        # A drawn X-mark built from straight strokes: layout lines are
+        # axis-aligned, so a diagonal segment means a drawn mark.
+        pdf = build_digital_pdf(
+            tmp_path / "xmark.pdf",
+            [DIGITAL_PAGE_TEXT],
+            extra_content_on_pages={
+                1: "1 w 100 100 m 140 140 l S 140 100 m 100 140 l S"
+            },
+        )
+        verdict = classify_document(pdf, 1)[1]
+        assert not verdict.is_digital
+        assert verdict.reason == "has-vector-marks"
+        assert verdict.vector_mark_count == 2
+
+    def test_axis_aligned_layout_stays_digital(self, tmp_path):
+        # Underlines, rules, and boxes — the layout present on most real
+        # contracts — must not cost the page its skip.
+        pdf = build_digital_pdf(
+            tmp_path / "layout.pdf",
+            [DIGITAL_PAGE_TEXT],
+            extra_content_on_pages={
+                1: "1 w 72 300 m 400 300 l S "  # horizontal rule
+                "500 100 m 500 400 l S "        # vertical rule
+                "72 500 200 60 re S"            # box
+            },
+        )
+        verdict = classify_document(pdf, 1)[1]
+        assert verdict.is_digital
+        assert verdict.reason == "digital-text"
+
     def test_scan_runs_only_for_would_be_skipped_pages(
         self, tmp_path, monkeypatch
     ):
@@ -235,7 +266,9 @@ class TestVectorMarks:
         monkeypatch.setattr(
             classification,
             "run_sandboxed",
-            lambda *_args, **_kwargs: b'{"1": {"curves": 0, "markup_annots": 0}}',
+            lambda *_args, **_kwargs: (
+                b'{"1": {"curves": 0, "diagonal_lines": 0, "markup_annots": 0}}'
+            ),
         )
         with pytest.raises(ValueError, match=r"page\(s\) \[2\]"):
             classification._vector_mark_counts(tmp_path / "doc.pdf", [1, 2])

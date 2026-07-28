@@ -5,13 +5,18 @@ drawn as vector paths — a stylus signature, annotation ink, a stamp drawn
 with shape tools — are invisible to both. This module uses pdfplumber to
 count, per page:
 
-- ``curves``: bezier path segments. Straight lines and rectangles are
-  deliberately NOT counted — they are table borders, signature-line rules,
-  and underlines on virtually every contract — while drawn handwriting is
-  made of curves.
+- ``curves``: bezier path segments. Drawn handwriting is made of curves.
+- ``diagonal_lines``: straight segments that are neither horizontal nor
+  vertical. Document layout (table borders, signature-line rules,
+  underlines — present on 57% of legitimately skippable real contract
+  pages) is axis-aligned, while a drawn "X" or check mark built from
+  straight strokes is not.
 - ``markup_annots``: annotations of the markup subtypes (Ink, FreeText,
   Stamp, ...). Benign subtypes (Link hyperlinks, Widget form fields) are
   ignored.
+
+Axis-aligned lines and rectangles are deliberately NOT counted — doing so
+would flag most born-digital contracts over their layout.
 
 Run as a module (``python -m ocr_engine.vector_marks file.pdf --pages
 1,2,3``) it prints a JSON object mapping each requested page number to its
@@ -48,9 +53,23 @@ MARKUP_ANNOTATION_SUBTYPES = frozenset(
     }
 )
 
+# A segment is axis-aligned (benign layout) when its extent on one axis
+# stays within this many points — generous enough for rendering jitter,
+# far below any deliberate diagonal stroke.
+AXIS_ALIGNED_TOLERANCE_PTS = 2.0
+
+
+def _is_diagonal(line: dict) -> bool:
+    width = abs(line["x1"] - line["x0"])
+    height = abs(line["bottom"] - line["top"])
+    return (
+        width > AXIS_ALIGNED_TOLERANCE_PTS
+        and height > AXIS_ALIGNED_TOLERANCE_PTS
+    )
+
 
 def scan(pdf_path: Path, page_numbers: list[int]) -> dict[int, dict[str, int]]:
-    """Count curves and markup annotations on the requested pages."""
+    """Count curves, diagonal lines, and markup annotations per page."""
 
     # pylint: disable-next=import-outside-toplevel
     import pdfplumber  # heavyweight; imported only in the sandboxed child
@@ -66,6 +85,9 @@ def scan(pdf_path: Path, page_numbers: list[int]) -> dict[int, dict[str, int]]:
                     markup += 1
             counts[page.page_number] = {
                 "curves": len(page.curves),
+                "diagonal_lines": sum(
+                    1 for line in page.lines if _is_diagonal(line)
+                ),
                 "markup_annots": markup,
             }
     return counts

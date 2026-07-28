@@ -117,10 +117,10 @@ Born-digital PDF pages don't need OCR: before rendering, every page is
 classified with Poppler (`pdftotext` + `pdfimages -list`) plus a
 pdfplumber vector scan, and a page **skips the Mistral call** only when it
 has **≥ 120 non-whitespace characters of embedded digital text, zero
-embedded raster images, AND zero vector-drawn marks** (bezier curves or
-markup annotations — a stylus signature or annotation ink that raster
-tools can't see; harmless straight lines and rectangles like table
-borders stay benign). There is deliberately **no image-size threshold** —
+embedded raster images, AND zero vector-drawn marks** (bezier curves,
+diagonal lines, or markup annotations — a stylus signature, a drawn
+X-mark, or annotation ink that raster tools can't see; axis-aligned
+lines and rectangles like table borders and underlines stay benign). There is deliberately **no image-size threshold** —
 on real contracts a DocuSign signature image covers ~1% of the page while
 a decorative letterhead logo covers ~9%, so size cannot separate content
 from decoration; any image at all routes the page to OCR. The character
@@ -162,11 +162,13 @@ it) — and a **fully digital document requires neither `MISTRAL_API_KEY`
 nor `pdftoppm`**: OCR dependencies are checked only when at least one
 page actually needs OCR. Opt out per-run with
 `overrides={"skip_digital_pages": False}`. Single-image sources are never
-classified (PDF-only). Residual limitation (accepted): a mark composed
-purely of straight vector segments with no annotation entry is treated as
-layout (table borders, rules) and would be skipped — drawn handwriting is
-made of curves, and zero pages in the 281 validated contract pages
-carried vector marks of any kind.
+classified (PDF-only). Residual limitation (accepted): a purely
+horizontal or vertical drawn mark (e.g. a strikethrough drawn as a plain
+line) is indistinguishable from an underline without rendering the page,
+and is treated as layout — axis-aligned segments appear on 57% of
+legitimately skippable real contract pages, so flagging them would gut
+the feature. Drawn handwriting, X-marks, and check marks are curves or
+diagonals, which are flagged.
 
 ## Profiles
 
