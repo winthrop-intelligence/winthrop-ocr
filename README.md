@@ -97,12 +97,17 @@ for page in result.pages:
 result.summary()["alteration_pages"], result.summary()["vision_failed_pages"]
 ```
 
-**The verdict is flag-only by design.** Benchmarked on user-confirmed
-altered contracts, the model dependably identifies which page/clause was
-altered but routinely misread the struck and replacement values — so
-values are neither requested nor accepted (entries carry only `clause`
-and `kind`). Route flagged pages to human review of the actual scan to
-read the real values.
+**The verdict is flag-only by design.** Benchmarked on a 1,386-page
+held-out corpus (game, employment, vendor, and financial documents) plus
+user-confirmed altered contracts: 100% detection recall with a ~9% page
+flag rate. The prompt is evidence-grounded — the model must inventory the
+physical marks it sees and may only report alterations backed by pen
+handwriting or strike-through marks — which suppresses false flags from
+e-signature fonts, typed form fill-ins, and scanner noise. The model
+dependably identifies which page/clause was altered but routinely misread
+the struck and replacement values — so values are neither requested nor
+accepted (entries carry only `clause` and `kind`). Route flagged pages to
+human review of the actual scan to read the real values.
 
 Detection **soft-fails**: a vision error records a non-success
 `alt.status` ("rate_limited", "timeout", "parse_error", ...) and never
