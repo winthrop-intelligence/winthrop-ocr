@@ -2,7 +2,9 @@
 
 A page skips OCR only when its PDF already carries the complete text:
 at least ``MIN_DIGITAL_TEXT_CHARS`` non-whitespace characters of embedded
-digital text (pdftotext) AND zero embedded raster images (pdfimages).
+digital text (pdftotext), zero embedded raster images (pdfimages), AND
+zero vector-drawn marks — bezier curves or markup annotations (pdfplumber
+via :mod:`ocr_engine.vector_marks`).
 
 There is deliberately NO image-size threshold: on real contracts a
 DocuSign signature image covers ~1% of the page while a decorative
@@ -10,31 +12,34 @@ letterhead logo covers ~9%, so size cannot separate content-bearing
 images from decoration. Any image at all routes the page to OCR — the
 failure direction is an unnecessary OCR call, never lost content.
 
-Classification is fail-safe: every error (missing tool, unreadable or
-password-protected PDF, timeout, unrecognized pdfimages output) downgrades
-to "send to OCR" and never raises past :func:`classify_document`. The
-whole document runs on two Poppler calls — one ``pdfimages -list`` and one
-``pdftotext`` covering all pages — so pre-flight latency is bounded by two
-subprocess timeouts regardless of page count.
+The vector-mark gate runs LAST and only for pages that would otherwise be
+skipped, so scanned documents never pay its cost. It counts curves (drawn
+handwriting is made of curves) and markup annotations (Ink, Stamp, ...),
+while straight lines and rectangles — table borders and rules present on
+virtually every contract — stay benign. Residual gap, accepted: a mark
+composed purely of straight segments with no annotation entry would not
+be flagged; zero pages in the 281 validated contract pages carried vector
+marks of any kind.
 
-Known limitation (accepted in SCR-2285): purely VECTOR-drawn marks —
-ink/markup annotations or signatures drawn as paths rather than pixels —
-are invisible to ``pdfimages``, so a text-rich page carrying only vector
-marks classifies as digital and skips OCR and vision. Zero such pages
-existed across the 281 validated contract pages (e-sign tools embed
-signatures as raster images), and anything printed-and-scanned becomes
-raster anyway. If vector marks show up in practice, harden by counting
-``page.curves``/annotations via pdfplumber before trusting the skip.
+Classification is fail-safe: every error (missing tool, unreadable or
+password-protected PDF, timeout, unrecognized tool output) downgrades to
+"send to OCR" and never raises past :func:`classify_document`. The whole
+document runs on at most three sandboxed subprocess calls — one
+``pdfimages -list``, one ``pdftotext`` covering all pages, and one vector
+scan covering the would-be-skipped pages — so pre-flight latency is
+bounded by three timeouts regardless of page count.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ocr_engine.rendering import run_poppler
+from ocr_engine.rendering import run_sandboxed
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +48,10 @@ logger = logging.getLogger(__name__)
 # DocuSign envelope stamps run ~40-80 chars; real contract pages 300+.
 MIN_DIGITAL_TEXT_CHARS = 120
 
-# Each tool scans the whole document exactly once per classification.
+# Each tool scans the whole document at most once per classification.
 PDFIMAGES_LIST_TIMEOUT_SECONDS = 60
 PDFTOTEXT_DOCUMENT_TIMEOUT_SECONDS = 120
+VECTOR_SCAN_TIMEOUT_SECONDS = 120
 
 # pdfimages -list "type" values that do NOT count as an image: soft masks
 # and stencil masks always accompany the parent image row they shape.
@@ -64,10 +70,13 @@ class PageClassification:
     page_number: int
     is_digital: bool
     text: str = ""  # pdftotext output for the page; "" unless digital
-    reason: str = ""  # "digital-text" | "has-images" | "sparse-text" | "classification-error"
+    # "digital-text" | "has-images" | "has-vector-marks" | "sparse-text"
+    # | "classification-error"
+    reason: str = ""
     char_count: int = 0  # non-whitespace chars seen by pdftotext
     image_count: int = 0  # pdfimages rows on this page
-    elapsed_ms: int = 0  # this page's share of the document's pdftotext time
+    vector_mark_count: int = 0  # curves + markup annotations on this page
+    elapsed_ms: int = 0  # this page's share of the document's pre-flight time
 
 
 def classify_document(
@@ -75,8 +84,8 @@ def classify_document(
 ) -> dict[int, PageClassification]:
     """Classify every page of a PDF; never raises.
 
-    Any failure — either Poppler call, or output that does not parse
-    cleanly — yields needs-OCR verdicts for every page.
+    Any failure — any of the three tool calls, or output that does not
+    parse cleanly — yields needs-OCR verdicts for every page.
     """
 
     try:
@@ -86,12 +95,27 @@ def classify_document(
             for number in range(1, page_count + 1)
             if image_counts.get(number, 0) == 0
         ]
-        if image_free:
-            started = time.monotonic()
-            page_texts = _document_page_texts(pdf_path, page_count)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-        else:
-            page_texts, elapsed_ms = [], 0
+        started = time.monotonic()
+        page_texts = (
+            _document_page_texts(pdf_path, page_count) if image_free else []
+        )
+        char_counts = {
+            number: sum(
+                1 for ch in page_texts[number - 1] if not ch.isspace()
+            )
+            for number in image_free
+        }
+        # The expensive pdfplumber gate runs only for pages that would
+        # otherwise skip OCR; scanned documents never pay its cost.
+        candidates = [
+            number
+            for number in image_free
+            if char_counts[number] >= MIN_DIGITAL_TEXT_CHARS
+        ]
+        vector_counts = (
+            _vector_mark_counts(pdf_path, candidates) if candidates else {}
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
     except Exception as exc:
         logger.warning(
             "digital-page classification failed for %s; all pages go to OCR: %s",
@@ -105,8 +129,8 @@ def classify_document(
             for number in range(1, page_count + 1)
         }
 
-    # summary()["elapsed_ms"] sums per-page times, so the single pdftotext
-    # call's cost is spread across the pages it served, not repeated.
+    # summary()["elapsed_ms"] sums per-page times, so the document-wide
+    # pdftotext + vector-scan cost is spread across the pages it served.
     elapsed_share = elapsed_ms // len(image_free) if image_free else 0
 
     verdicts: dict[int, PageClassification] = {}
@@ -117,18 +141,8 @@ def classify_document(
                 number, is_digital=False, reason="has-images", image_count=count
             )
             continue
-        text = page_texts[number - 1]
-        chars = sum(1 for ch in text if not ch.isspace())
-        if chars >= MIN_DIGITAL_TEXT_CHARS:
-            verdicts[number] = PageClassification(
-                number,
-                is_digital=True,
-                text=text,
-                reason="digital-text",
-                char_count=chars,
-                elapsed_ms=elapsed_share,
-            )
-        else:
+        chars = char_counts[number]
+        if chars < MIN_DIGITAL_TEXT_CHARS:
             verdicts[number] = PageClassification(
                 number,
                 is_digital=False,
@@ -136,6 +150,26 @@ def classify_document(
                 char_count=chars,
                 elapsed_ms=elapsed_share,
             )
+            continue
+        vector_marks = vector_counts.get(number, 0)
+        if vector_marks > 0:
+            verdicts[number] = PageClassification(
+                number,
+                is_digital=False,
+                reason="has-vector-marks",
+                char_count=chars,
+                vector_mark_count=vector_marks,
+                elapsed_ms=elapsed_share,
+            )
+            continue
+        verdicts[number] = PageClassification(
+            number,
+            is_digital=True,
+            text=page_texts[number - 1],
+            reason="digital-text",
+            char_count=chars,
+            elapsed_ms=elapsed_share,
+        )
 
     digital = sum(1 for verdict in verdicts.values() if verdict.is_digital)
     logger.info(
@@ -150,7 +184,7 @@ def classify_document(
 def _pdfimages_page_counts(pdf_path: Path) -> dict[int, int]:
     """Count embedded raster images per page via pdfimages (memory-capped)."""
 
-    output = run_poppler(
+    output = run_sandboxed(
         ["pdfimages", "-list", str(pdf_path)],
         timeout=PDFIMAGES_LIST_TIMEOUT_SECONDS,
         failure=f"pdfimages could not read {pdf_path.name}",
@@ -205,7 +239,7 @@ def _document_page_texts(pdf_path: Path, page_count: int) -> list[str]:
     and the caller's fail-safe routes all pages to OCR.
     """
 
-    raw = run_poppler(
+    raw = run_sandboxed(
         ["pdftotext", "-enc", "UTF-8", str(pdf_path), "-"],
         timeout=PDFTOTEXT_DOCUMENT_TIMEOUT_SECONDS,
         failure=f"pdftotext could not read {pdf_path.name}",
@@ -222,3 +256,42 @@ def _document_page_texts(pdf_path: Path, page_count: int) -> list[str]:
             f"expected {page_count}"
         )
     return pages
+
+
+def _vector_mark_counts(pdf_path: Path, page_numbers: list[int]) -> dict[int, int]:
+    """Count vector-drawn marks (curves + markup annotations) per page.
+
+    Runs :mod:`ocr_engine.vector_marks` (pdfplumber) in the same sandboxed
+    subprocess harness as the Poppler tools, so the heavyweight PDF parse
+    of an untrusted file happens in a memory-capped child process. Every
+    requested page must appear in the response — a page the scan skipped
+    is ambiguous and raises into the caller's fail-safe.
+    """
+
+    raw = run_sandboxed(
+        [
+            sys.executable,
+            "-m",
+            "ocr_engine.vector_marks",
+            str(pdf_path),
+            "--pages",
+            ",".join(str(number) for number in page_numbers),
+        ],
+        timeout=VECTOR_SCAN_TIMEOUT_SECONDS,
+        failure=f"vector scan could not read {pdf_path.name}",
+        install_hint="reinstall winthrop-ocr",
+    )
+    counts = json.loads(raw.decode("utf-8"))
+    missing = [
+        number for number in page_numbers if str(number) not in counts
+    ]
+    if missing:
+        raise ValueError(
+            f"vector scan of {pdf_path.name} returned no verdict for "
+            f"page(s) {missing}"
+        )
+    return {
+        number: counts[str(number)]["curves"]
+        + counts[str(number)]["markup_annots"]
+        for number in page_numbers
+    }

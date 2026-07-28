@@ -230,6 +230,24 @@ class TestDigitalPages:
         baseline = ocr_document(pdf)
         assert result.policy_fingerprint != baseline.policy_fingerprint
 
+    def test_vector_marked_page_goes_to_ocr(self, tmp_path, fake_registry):
+        # Text-rich page with a stylus-signature stand-in drawn as vector
+        # paths: no raster image, but the pdfplumber gate routes it to OCR.
+        pdf = build_digital_pdf(
+            tmp_path / "vector.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            curve_on_pages={2},
+        )
+        result = ocr_document(pdf)
+
+        assert fake_registry.calls == [2]
+        by_page = {outcome.page_number: outcome.selected for outcome in result.pages}
+        assert by_page[1].engine == "digital-text"
+        assert by_page[2].engine == "mistral"
+        assert (
+            by_page[2].metadata["classification"]["reason"] == "has-vector-marks"
+        )
+
     def test_stamp_only_page_still_goes_to_ocr(self, tmp_path, fake_registry):
         # The SCR-2285 trap: a scanned-page stand-in whose only digital text
         # is a short DocuSign stamp must not be skipped.

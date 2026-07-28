@@ -114,14 +114,17 @@ pinned dated ID: `-latest` aliases are rejected by policy validation
 ## Digital-page skip (v0.4.0)
 
 Born-digital PDF pages don't need OCR: before rendering, every page is
-classified with Poppler (`pdftotext` + `pdfimages -list`), and a page
-**skips the Mistral call** only when it has **≥ 120 non-whitespace
-characters of embedded digital text AND zero embedded raster images**.
-There is deliberately **no image-size threshold** — on real contracts a
-DocuSign signature image covers ~1% of the page while a decorative
-letterhead logo covers ~9%, so size cannot separate content from
-decoration; any image at all routes the page to OCR. The character floor
-keeps stamp-only scans (e.g. a scanned page carrying just a digital
+classified with Poppler (`pdftotext` + `pdfimages -list`) plus a
+pdfplumber vector scan, and a page **skips the Mistral call** only when it
+has **≥ 120 non-whitespace characters of embedded digital text, zero
+embedded raster images, AND zero vector-drawn marks** (bezier curves or
+markup annotations — a stylus signature or annotation ink that raster
+tools can't see; harmless straight lines and rectangles like table
+borders stay benign). There is deliberately **no image-size threshold** —
+on real contracts a DocuSign signature image covers ~1% of the page while
+a decorative letterhead logo covers ~9%, so size cannot separate content
+from decoration; any image at all routes the page to OCR. The character
+floor keeps stamp-only scans (e.g. a scanned page carrying just a digital
 "DocuSign Envelope ID" line) on the OCR path too.
 
 Skipped pages come back as normal success pages:
@@ -143,23 +146,27 @@ result.summary()["ocr_page_numbers"]      # pages that took the render+OCR path
 
 OCR-routed pages of a classified PDF also carry the routing evidence in
 `page.selected.metadata["classification"]` (`reason` of `has-images` /
-`sparse-text` / `classification-error`, plus char/image counts), so
-consumers can ship `summary()` and per-page reasons straight into their
-metrics (e.g. a Sentry dashboard) without parsing logs.
+`has-vector-marks` / `sparse-text` / `classification-error`, plus
+char/image/vector counts), so consumers can ship `summary()` and per-page
+reasons straight into their metrics (e.g. a Sentry dashboard) without
+parsing logs.
 
 Classification **fail-safes to OCR**: any error (unreadable PDF, missing
-tool, timeout, unrecognized Poppler output) sends the page through the
+tool, timeout, unrecognized tool output) sends the page through the
 normal render+OCR path and never fails the document. The worst failure
-mode is an unnecessary OCR call — never lost content. Classification costs
-two subprocess calls per document (one `pdfimages -list`, one `pdftotext`)
-regardless of page count, and a **fully digital document requires neither
-`MISTRAL_API_KEY` nor `pdftoppm`** — OCR dependencies are checked only
-when at least one page actually needs OCR. Opt out per-run with
+mode is an unnecessary OCR call — never lost content. Classification
+costs at most three sandboxed subprocess calls per document — one
+`pdfimages -list`, one `pdftotext`, and one pdfplumber vector scan that
+runs **only for pages about to be skipped** (scanned documents never pay
+it) — and a **fully digital document requires neither `MISTRAL_API_KEY`
+nor `pdftoppm`**: OCR dependencies are checked only when at least one
+page actually needs OCR. Opt out per-run with
 `overrides={"skip_digital_pages": False}`. Single-image sources are never
-classified (PDF-only). Known limitation: purely vector-drawn marks
-(annotation ink, path-drawn signatures) are invisible to `pdfimages` and
-would be skipped — zero such pages existed in the 281 validated contract
-pages; see `ocr_engine/classification.py` for the hardening path.
+classified (PDF-only). Residual limitation (accepted): a mark composed
+purely of straight vector segments with no annotation entry is treated as
+layout (table borders, rules) and would be skipped — drawn handwriting is
+made of curves, and zero pages in the 281 validated contract pages
+carried vector marks of any kind.
 
 ## Profiles
 
@@ -177,6 +184,7 @@ for provenance.
 ocr_engine/
 ├── document.py        # ocr_document() — the entry point
 ├── classification.py  # pre-flight born-digital page detection (skip OCR)
+├── vector_marks.py    # pdfplumber vector/annotation scan (sandboxed child)
 ├── review.py          # per-page review flags (signature / handwriting)
 ├── vision.py          # per-page hand-alteration detection (Mistral vision)
 ├── runner.py          # run_page / OcrDocumentResult

@@ -64,20 +64,36 @@ def build_digital_pdf(
     path: Path,
     page_texts: Sequence[str],
     image_on_pages: Collection[int] = (),
+    curve_on_pages: Collection[int] = (),
+    ink_annot_on_pages: Collection[int] = (),
 ) -> Path:
     """Hand-assemble a born-digital PDF: real text objects, no raster pages.
 
     Pillow cannot make one (its PDF pages are embedded images), so this
     writes the classic minimal PDF by hand: Catalog, Pages, a built-in
-    Helvetica font, one Page + content stream per entry in ``page_texts``,
-    and — for 1-based pages listed in ``image_on_pages`` — a tiny 1x1
-    raster XObject drawn on the page so ``pdfimages -list`` reports it.
+    Helvetica font, and one Page + content stream per entry in
+    ``page_texts``. All page collections are 1-based:
+    - ``image_on_pages``: draw a tiny 1x1 raster XObject so
+      ``pdfimages -list`` reports it.
+    - ``curve_on_pages``: stroke a bezier squiggle (a stylus-signature
+      stand-in) — invisible to pdfimages, visible to pdfplumber.
+    - ``ink_annot_on_pages``: attach an /Ink markup annotation.
     Parses with real Poppler.
     """
 
     image_pages = {int(number) for number in image_on_pages}
+    curve_pages = {int(number) for number in curve_on_pages}
+    annot_pages = {int(number) for number in ink_annot_on_pages}
     include_image = bool(image_pages)
-    first_page_object = 5 if include_image else 4
+
+    # Objects 1-3 (+4 for the shared image) are fixed; each page then
+    # consumes a Page object, a content stream, and optionally an
+    # annotation object — so page object numbers must be precomputed.
+    next_object = 5 if include_image else 4
+    page_objects = []
+    for index in range(len(page_texts)):
+        page_objects.append(next_object)
+        next_object += 2 + (1 if index + 1 in annot_pages else 0)
 
     def escape(text: str) -> str:
         return (
@@ -85,9 +101,7 @@ def build_digital_pdf(
         )
 
     objects: list[bytes] = []
-    kids = " ".join(
-        f"{first_page_object + 2 * index} 0 R" for index in range(len(page_texts))
-    )
+    kids = " ".join(f"{number} 0 R" for number in page_objects)
     objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
     objects.append(
         f"<< /Type /Pages /Kids [{kids}] /Count {len(page_texts)} >>".encode(
@@ -104,16 +118,20 @@ def build_digital_pdf(
 
     for index, text in enumerate(page_texts):
         page_number = index + 1
+        page_object = page_objects[index]
         with_image = page_number in image_pages
         resources = "<< /Font << /F1 3 0 R >>"
         if with_image:
             resources += " /XObject << /Im1 4 0 R >>"
         resources += " >>"
-        objects.append(
+        page_dict = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            f"/Resources {resources} "
-            f"/Contents {first_page_object + 2 * index + 1} 0 R >>".encode("latin-1")
+            f"/Resources {resources} /Contents {page_object + 1} 0 R"
         )
+        if page_number in annot_pages:
+            page_dict += f" /Annots [{page_object + 2} 0 R]"
+        page_dict += " >>"
+        objects.append(page_dict.encode("latin-1"))
         ops = ["BT", "/F1 12 Tf", "14 TL", "72 720 Td"]
         for line_number, line in enumerate(text.split("\n")):
             if line_number:
@@ -122,10 +140,17 @@ def build_digital_pdf(
         ops.append("ET")
         if with_image:
             ops.append("q 40 0 0 40 500 706 cm /Im1 Do Q")
+        if page_number in curve_pages:
+            ops.append("1 w 100 200 m 120 240 140 160 160 200 c S")
         stream = "\n".join(ops).encode("latin-1")
         objects.append(
             b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
         )
+        if page_number in annot_pages:
+            objects.append(
+                b"<< /Type /Annot /Subtype /Ink /Rect [100 100 200 200] "
+                b"/InkList [[100 100 130 150 160 110]] /F 4 >>"
+            )
 
     out = bytearray(b"%PDF-1.4\n")
     offsets = []

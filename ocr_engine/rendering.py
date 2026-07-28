@@ -51,14 +51,21 @@ def document_id(path: Path) -> str:
     return f"{safe_stem}-{sha256_file(path)[:10]}"
 
 
-def run_poppler(arguments: Sequence[str], *, timeout: int, failure: str) -> bytes:
-    """Run one Poppler tool under the memory cap; return its stdout bytes.
+def run_sandboxed(
+    arguments: Sequence[str],
+    *,
+    timeout: int,
+    failure: str,
+    install_hint: str = "install Poppler",
+) -> bytes:
+    """Run one external tool under the memory cap; return its stdout bytes.
 
-    The canonical process adapter for every Poppler invocation (pdfinfo,
-    pdftoppm, pdfimages, pdftotext): one command assembly, one error
+    The canonical process adapter for every tool that decodes untrusted
+    PDFs — the Poppler CLI (pdfinfo, pdftoppm, pdfimages, pdftotext) and
+    the pdfplumber vector scan: one command assembly, one error
     normalization. Exit code 127 (tool missing) raises ``RuntimeError``
-    naming the tool; any other failure raises ``ValueError`` built from
-    ``failure`` plus the stderr tail.
+    naming the tool plus ``install_hint``; any other failure raises
+    ``ValueError`` built from ``failure`` plus the stderr tail.
     """
 
     # pylint: disable-next=import-outside-toplevel
@@ -80,14 +87,14 @@ def run_poppler(arguments: Sequence[str], *, timeout: int, failure: str) -> byte
         ).stdout
     except subprocess.CalledProcessError as exc:
         if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
-            raise RuntimeError(f"{tool} is required; install Poppler") from exc
+            raise RuntimeError(f"{tool} is required; {install_hint}") from exc
         raise ValueError(f"{failure} ({_stderr_excerpt(exc)})") from exc
 
 
 def pdf_page_count(pdf_path: Path) -> int:
     """Read the PDF page count using Poppler's pdfinfo (memory-capped)."""
 
-    output = run_poppler(
+    output = run_sandboxed(
         ["pdfinfo", str(pdf_path)],
         timeout=30,
         failure=f"pdfinfo could not read {pdf_path.name}",
@@ -104,7 +111,7 @@ def render_pdf_page(
     """Render one PDF page to a stable RGB PNG via memory-bounded pdftoppm."""
 
     prefix = output_path.with_suffix("")
-    run_poppler(
+    run_sandboxed(
         [
             "pdftoppm",
             "-f",

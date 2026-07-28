@@ -267,6 +267,7 @@ def _classification_metadata(verdict: PageClassification) -> dict[str, Any]:
         "reason": verdict.reason,
         "char_count": verdict.char_count,
         "image_count": verdict.image_count,
+        "vector_mark_count": verdict.vector_mark_count,
         "min_chars": MIN_DIGITAL_TEXT_CHARS,
     }
 

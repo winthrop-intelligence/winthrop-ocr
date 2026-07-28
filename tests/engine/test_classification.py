@@ -164,7 +164,7 @@ class TestDocumentPageTexts:
     def test_page_count_mismatch_raises(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             classification,
-            "run_poppler",
+            "run_sandboxed",
             lambda *_args, **_kwargs: b"page one\fpage two\f",
         )
         with pytest.raises(ValueError, match="expected 3"):
@@ -173,11 +173,72 @@ class TestDocumentPageTexts:
     def test_output_without_trailing_form_feed_raises(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             classification,
-            "run_poppler",
+            "run_sandboxed",
             lambda *_args, **_kwargs: b"page one without terminator",
         )
         with pytest.raises(ValueError, match="form-feed"):
             _document_page_texts(tmp_path / "doc.pdf", 1)
+
+
+class TestVectorMarks:
+    def test_curve_page_needs_ocr(self, tmp_path):
+        # A bezier squiggle drawn as vector paths (a stylus-signature
+        # stand-in): invisible to pdfimages, caught by the pdfplumber gate.
+        pdf = build_digital_pdf(
+            tmp_path / "curve.pdf",
+            [DIGITAL_PAGE_TEXT, DIGITAL_PAGE_TEXT],
+            curve_on_pages={2},
+        )
+        verdicts = classify_document(pdf, 2)
+
+        assert verdicts[1].is_digital
+        assert not verdicts[2].is_digital
+        assert verdicts[2].reason == "has-vector-marks"
+        assert verdicts[2].vector_mark_count >= 1
+
+    def test_ink_annotation_page_needs_ocr(self, tmp_path):
+        pdf = build_digital_pdf(
+            tmp_path / "ink.pdf", [DIGITAL_PAGE_TEXT], ink_annot_on_pages={1}
+        )
+        verdict = classify_document(pdf, 1)[1]
+        assert not verdict.is_digital
+        assert verdict.reason == "has-vector-marks"
+
+    def test_scan_runs_only_for_would_be_skipped_pages(
+        self, tmp_path, monkeypatch
+    ):
+        # Scanned documents (all pages carry images) must never pay the
+        # pdfplumber cost.
+        def fail(*_args, **_kwargs):
+            pytest.fail("vector scan must not run when no page is skippable")
+
+        monkeypatch.setattr(classification, "_vector_mark_counts", fail)
+        pdf = build_pdf(tmp_path / "scan.pdf", pages=2)
+        verdicts = classify_document(pdf, 2)
+        assert all(v.reason == "has-images" for v in verdicts.values())
+
+    def test_scan_failure_is_fail_safe(self, tmp_path, monkeypatch):
+        def boom(_pdf_path, _pages):
+            raise ValueError("vector scan could not read doc.pdf (exit status 1)")
+
+        monkeypatch.setattr(classification, "_vector_mark_counts", boom)
+        pdf = build_digital_pdf(
+            tmp_path / "digital.pdf", [DIGITAL_PAGE_TEXT]
+        )
+        verdicts = classify_document(pdf, 1)  # must not raise
+        assert not verdicts[1].is_digital
+        assert verdicts[1].reason == "classification-error"
+
+    def test_missing_scan_verdict_raises(self, tmp_path, monkeypatch):
+        # A page the scan skipped is ambiguous — it must not default to
+        # "no marks".
+        monkeypatch.setattr(
+            classification,
+            "run_sandboxed",
+            lambda *_args, **_kwargs: b'{"1": {"curves": 0, "markup_annots": 0}}',
+        )
+        with pytest.raises(ValueError, match=r"page\(s\) \[2\]"):
+            classification._vector_mark_counts(tmp_path / "doc.pdf", [1, 2])
 
 
 class TestFailSafe:
