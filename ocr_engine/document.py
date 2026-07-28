@@ -185,11 +185,18 @@ def ocr_document(
                     source, pages_dir, dpi=policy.dpi, identifier=identifier
                 )
             try:
-                return run_page(page, engines, policy)
+                outcome = run_page(page, engines, policy)
             finally:
                 # Bound disk usage to ~max_workers rendered images.
                 with contextlib.suppress(OSError):
                     page.image_path.unlink()
+            if verdict is not None:
+                # Record why the page was routed to OCR so consumers'
+                # metrics can slice routing by reason without the logs.
+                outcome.selected.metadata["classification"] = (
+                    _classification_metadata(verdict)
+                )
+            return outcome
 
         logger.info(
             "OCR starting for %s: %d page(s), profile=%s, %d digital page(s) skip OCR",
@@ -253,6 +260,17 @@ def _require_ocr_capability(
         )
 
 
+def _classification_metadata(verdict: PageClassification) -> dict[str, Any]:
+    """The pre-flight verdict's evidence, attached to every classified page."""
+
+    return {
+        "reason": verdict.reason,
+        "char_count": verdict.char_count,
+        "image_count": verdict.image_count,
+        "min_chars": MIN_DIGITAL_TEXT_CHARS,
+    }
+
+
 def _digital_page_outcome(
     identifier: str, verdict: PageClassification
 ) -> PageOutcome:
@@ -276,14 +294,7 @@ def _digital_page_outcome(
         text=verdict.text,
         elapsed_ms=verdict.elapsed_ms,
         confidence=100.0,  # exact digital extraction, not a model estimate
-        metadata={
-            "classification": {
-                "reason": verdict.reason,
-                "char_count": verdict.char_count,
-                "image_count": verdict.image_count,
-                "min_chars": MIN_DIGITAL_TEXT_CHARS,
-            }
-        },
+        metadata={"classification": _classification_metadata(verdict)},
     )
     return PageOutcome(
         page_number=verdict.page_number,

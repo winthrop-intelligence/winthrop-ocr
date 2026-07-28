@@ -93,6 +93,11 @@ class OcrDocumentResult:
             engines_used[outcome.selected.engine] = (
                 engines_used.get(outcome.selected.engine, 0) + 1
             )
+        digital_page_numbers = [
+            outcome.page_number
+            for outcome in self.pages
+            if outcome.selected.engine == DIGITAL_TEXT_ENGINE
+        ]
         return {
             "page_count": len(self.pages),
             "pages_failed": sum(
@@ -105,6 +110,14 @@ class OcrDocumentResult:
                 1 for outcome in self.pages if outcome.review.handwriting_suspected
             ),
             "digital_pages": engines_used.get(DIGITAL_TEXT_ENGINE, 0),
+            # Routing detail for consumers' metrics/dashboards (e.g. Sentry):
+            # which pages skipped OCR and which took the render+OCR path.
+            "digital_page_numbers": digital_page_numbers,
+            "ocr_page_numbers": [
+                outcome.page_number
+                for outcome in self.pages
+                if outcome.selected.engine != DIGITAL_TEXT_ENGINE
+            ],
             "min_confidence": min(confidences) if confidences else None,
             "mean_confidence": (
                 sum(confidences) / len(confidences) if confidences else None

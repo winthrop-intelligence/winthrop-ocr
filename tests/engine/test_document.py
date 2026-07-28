@@ -175,6 +175,8 @@ class TestDigitalPages:
         summary = result.summary()
         assert summary["digital_pages"] == 2
         assert summary["engines_used"] == {"digital-text": 2}
+        assert summary["digital_page_numbers"] == [1, 2]
+        assert summary["ocr_page_numbers"] == []
         assert summary["pages_failed"] == 0
 
     def test_mixed_document_routes_only_image_pages_to_engine(
@@ -191,8 +193,13 @@ class TestDigitalPages:
         by_page = {outcome.page_number: outcome.selected for outcome in result.pages}
         assert by_page[1].engine == "digital-text"
         assert by_page[2].engine == "mistral"
-        assert result.summary()["digital_pages"] == 1
-        assert result.summary()["engines_used"] == {"digital-text": 1, "mistral": 1}
+        # OCR-routed pages carry the routing reason for consumers' metrics.
+        assert by_page[2].metadata["classification"]["reason"] == "has-images"
+        summary = result.summary()
+        assert summary["digital_pages"] == 1
+        assert summary["engines_used"] == {"digital-text": 1, "mistral": 1}
+        assert summary["digital_page_numbers"] == [1]
+        assert summary["ocr_page_numbers"] == [2]
 
     def test_vision_never_runs_for_digital_pages(
         self, tmp_path, fake_registry, monkeypatch

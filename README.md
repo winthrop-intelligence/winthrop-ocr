@@ -136,8 +136,16 @@ for page in result.pages:
         page.selected.metadata["classification"]  # reason / char_count / image_count
         page.alterations                  # None: no rendered image, so the
                                           # vision/alteration pass doesn't run
-result.summary()["digital_pages"]
+result.summary()["digital_pages"]         # count of pages that skipped OCR
+result.summary()["digital_page_numbers"]  # e.g. [9, 10, 11, 12]
+result.summary()["ocr_page_numbers"]      # pages that took the render+OCR path
 ```
+
+OCR-routed pages of a classified PDF also carry the routing evidence in
+`page.selected.metadata["classification"]` (`reason` of `has-images` /
+`sparse-text` / `classification-error`, plus char/image counts), so
+consumers can ship `summary()` and per-page reasons straight into their
+metrics (e.g. a Sentry dashboard) without parsing logs.
 
 Classification **fail-safes to OCR**: any error (unreadable PDF, missing
 tool, timeout, unrecognized Poppler output) sends the page through the
