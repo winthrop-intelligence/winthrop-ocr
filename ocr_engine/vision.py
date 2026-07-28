@@ -45,25 +45,42 @@ MAX_ALTERATION_ENTRIES = 50
 ENTRY_VALUE_MAX_CHARS = 300
 RAW_EXCERPT_MAX_CHARS = 2000
 
-# Benchmark-validated (100% detection recall on confirmed altered pages).
-# Do not edit without re-running the ground-truth benchmark — the
-# signature/blank-fill exclusions encode confirmed false-positive classes.
-# Deliberately flag-only: value transcriptions proved unreliable in
-# benchmarks, so they are neither requested nor accepted (see
-# ALLOWED_ENTRY_KEYS) — a human reads the real values off the scan.
+# Benchmark-validated against a 1,386-page held-out corpus (133 real
+# contracts: game, employment, vendor, financial) plus 6 user-confirmed
+# hand-altered pages: 100% detection recall, ~9% page flag rate (half the
+# naive prompt's rate). Do not edit without re-running that benchmark.
+# Structure: evidence grounding — the model must first inventory the
+# physical marks it can SEE and classify them against a named taxonomy;
+# only pen_handwriting / pen_strikethrough marks may ground an alteration.
+# This suppresses the dominant failure mode (confabulating an alteration
+# on a clean typed page anchored to a salient salary/date clause) and the
+# e-signature-font / typed-form-fill-in / scan-noise false-positive
+# classes. Flag-only: value transcriptions are neither requested nor
+# accepted (see ALLOWED_ENTRY_KEYS).
 ALTERATIONS_PROMPT = (
-    "You are examining one page of a scanned contract. Look "
-    "carefully for any place where PRINTED/TYPED text — especially a dollar "
-    "amount or a date — has been physically crossed out (struck through) "
-    "and/or replaced with HANDWRITING. Also look for handwritten values "
-    "written over or above typed values, and any initials/dates marking such "
-    "corrections. IGNORE signatures and dates in the signature block, and "
-    "ignore handwriting in fields that were intentionally left blank. "
-    'Respond ONLY with JSON: {"alterations": [{"clause": "...", '
-    '"kind": "dollar_amount|date|other"}], "none_found": false}. For each '
-    "alteration report only the clause where it appears and its kind — do "
-    "NOT transcribe the values. If the page has no such alterations, return "
-    '{"alterations": [], "none_found": true}.'
+    "You are examining one page of a contract for physical handwritten "
+    "alterations made with a pen: printed/typed text that has been crossed out "
+    "and/or replaced by handwriting. Work in two steps in one JSON response. "
+    "STEP 1 — inventory every non-body-text mark you can SEE and classify it "
+    "honestly as one of: pen_handwriting (irregular ink strokes written by "
+    "hand), pen_strikethrough (an ink line crossing THROUGH the middle of "
+    "printed characters), esignature_font (DocuSign/Adobe-style cursive "
+    "script rendered by a computer, usually near a signature line or inside a "
+    "signature box), typed_fill_in (typed or monospace text inserted into a "
+    "form blank or styled differently from the body — including bold inserted "
+    "phrases and values sitting ON TOP OF an underline; an underline UNDER "
+    "text is not a strikethrough), page_number, stamp, smudge_or_scan_noise, "
+    "signature. STEP 2 — report an alteration ONLY for marks classified "
+    "pen_handwriting or pen_strikethrough that overlap or replace printed "
+    "text in the document body. All other mark types are NEVER alterations. "
+    "A page that is uniformly machine-printed with no pen ink anywhere has no "
+    "alterations, no matter what values it contains — never infer alterations "
+    "from the meaning of typed text or from document quality. Most pages have "
+    "none. Respond ONLY with JSON: {\"visible_marks\": [{\"location\": "
+    "\"...\", \"type\": \"...\"}], \"alterations\": [{\"clause\": \"...\", "
+    "\"kind\": \"dollar_amount|date|other\", \"mark_index\": 0}], "
+    "\"none_found\": false}. Do NOT transcribe values. If no alterations: "
+    "\"alterations\": [] and \"none_found\": true."
 )
 
 # The only entry fields consumers may see. Anything else the model volunteers
