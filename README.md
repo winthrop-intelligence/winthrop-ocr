@@ -115,6 +115,14 @@ the struck and replacement values — so values are neither requested nor
 accepted (entries carry only `clause` and `kind`). Route flagged pages to
 human review of the actual scan to read the real values.
 
+Flagged pages pass two false-positive filters before surfacing (v0.4.1):
+a deterministic blank-page guard (a page with no printed text cannot
+carry an altered printed value), and a second adversarial vision call
+that must re-confirm the pen ink (`alt.verified`: True confirmed /
+False rejected-and-cleared / None not-applicable or failed-open).
+Verification adds one call only on flagged pages; disable with
+`overrides={"vision_verify": False}`.
+
 Detection **soft-fails**: a vision error records a non-success
 `alt.status` ("rate_limited", "timeout", "parse_error", ...) and never
 fails the page or document — the OCR text stands on its own. Opt out

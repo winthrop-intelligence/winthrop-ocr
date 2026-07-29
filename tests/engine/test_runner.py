@@ -86,6 +86,52 @@ class TestVisionWiring:
         assert outcome.alterations is not None
         assert outcome.alterations.flagged is True
 
+    def test_blank_page_flag_is_suppressed_without_verification(
+        self, tmp_path, monkeypatch
+    ):
+        # An altered printed value cannot exist on a page with no printed
+        # text; the guard clears the flag and never spends a verify call.
+        fake_detector(monkeypatch, flagged_alterations())
+        verify_calls = []
+        monkeypatch.setattr(
+            runner_module, "verify_alterations", lambda *a: verify_calls.append(a)
+        )
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        registry = {"mistral": FakeEngine("mistral", text="  ")}
+        outcome = run_page(page, registry, POLICY)
+        assert outcome.alterations.flagged is False
+        assert outcome.alterations.verified is False
+        assert outcome.alterations.none_found is True
+        assert verify_calls == []
+
+    def test_flagged_pages_are_verified(self, tmp_path, monkeypatch):
+        fake_detector(monkeypatch, flagged_alterations())
+        verified = flagged_alterations()
+        verified.verified = True
+        verify_calls = []
+
+        def _verify(page, policy, first_pass):
+            verify_calls.append(page.page_number)
+            return verified
+
+        monkeypatch.setattr(runner_module, "verify_alterations", _verify)
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        outcome = run_page(page, engines(), POLICY)
+        assert verify_calls == [1]
+        assert outcome.alterations.verified is True
+
+    def test_verification_can_be_disabled_by_policy(self, tmp_path, monkeypatch):
+        fake_detector(monkeypatch, flagged_alterations())
+        monkeypatch.setattr(
+            runner_module,
+            "verify_alterations",
+            lambda *a: (_ for _ in ()).throw(AssertionError("must not verify")),
+        )
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        outcome = run_page(page, engines(), OcrPolicy(vision_verify=False))
+        assert outcome.alterations.flagged is True
+        assert outcome.alterations.verified is None
+
     def test_without_key_vision_soft_fails_as_unavailable(self, tmp_path):
         # The real detector, no monkeypatch: the autouse fixture removed the
         # key, so wiring must degrade to a status, never an exception.

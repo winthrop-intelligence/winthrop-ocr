@@ -17,7 +17,13 @@ from ocr_engine.classification import DIGITAL_TEXT_ENGINE
 from ocr_engine.models import OCRResult, PageAlterations, PageInput
 from ocr_engine.policy import OcrPolicy
 from ocr_engine.review import PageReviewFlags, detect_review_flags
-from ocr_engine.vision import detect_alterations
+from ocr_engine.vision import detect_alterations, verify_alterations
+
+# A hand alteration requires printed text to alter; a page whose OCR text
+# is (near-)empty cannot carry one, so a vision flag there is suppressed
+# without spending a verification call. Threshold covers stray scanner
+# noise that OCRs to a few characters.
+BLANK_PAGE_MIN_TEXT_CHARS = 25
 
 
 @dataclass
@@ -174,6 +180,18 @@ def run_page(
         if result.status == "success"
         else PageReviewFlags()
     )
+    if alterations is not None and alterations.flagged:
+        if (
+            result.status == "success"
+            and len(result.text.strip()) < BLANK_PAGE_MIN_TEXT_CHARS
+        ):
+            # Deterministic guard: nothing printed on the page, so an
+            # "altered printed value" is impossible.
+            alterations.alterations = []
+            alterations.none_found = True
+            alterations.verified = False
+        elif policy.vision_verify:
+            alterations = verify_alterations(page, policy, alterations)
     return PageOutcome(
         page_number=page.page_number,
         selected=result,

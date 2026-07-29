@@ -44,6 +44,12 @@ class PageAlterations:
     # Derived from ``alterations`` on success (never taken from the model,
     # so it cannot contradict ``flagged``); None on failed detections.
     none_found: bool | None = None
+    # Second-pass adversarial verification of a flagged first pass:
+    # True = confirmed, False = rejected (entries cleared: blank page or
+    # verifier refutation), None = not applicable (nothing flagged,
+    # verification disabled, or the verification call itself failed and we
+    # failed open to preserve recall).
+    verified: bool | None = None
     elapsed_ms: int = 0
     transport_retries: int = 0
     error_type: str | None = None

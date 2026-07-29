@@ -157,7 +157,9 @@ def _failed(
     )
 
 
-def _vision_request_kwargs(*, model: str, image_url: str) -> dict[str, Any]:
+def _vision_request_kwargs(
+    *, model: str, image_url: str, prompt: str = ALTERATIONS_PROMPT
+) -> dict[str, Any]:
     """The exact chat-completions request the vision call sends.
 
     Kept as a separate builder so tests can bind it against the REAL SDK's
@@ -171,7 +173,7 @@ def _vision_request_kwargs(*, model: str, image_url: str) -> dict[str, Any]:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": ALTERATIONS_PROMPT},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": image_url},
                 ],
             }
@@ -183,14 +185,14 @@ def _vision_request_kwargs(*, model: str, image_url: str) -> dict[str, Any]:
 
 
 def _complete_vision_with_retries(
-    *, api_key: str, image_url: str, model: str
+    *, api_key: str, image_url: str, model: str, prompt: str = ALTERATIONS_PROMPT
 ) -> tuple[Any, int]:
     """Retry transient vision transport failures with a fresh SDK client."""
 
     # pylint: disable-next=import-outside-toplevel,import-error
     from mistralai.client import Mistral
 
-    request = _vision_request_kwargs(model=model, image_url=image_url)
+    request = _vision_request_kwargs(model=model, image_url=image_url, prompt=prompt)
     for attempt in range(VISION_MAX_ATTEMPTS):
         try:
             client = Mistral(api_key=api_key)
@@ -294,3 +296,65 @@ def _validated_entry(entry: Any) -> dict[str, Any] | None:
     if kind not in ALLOWED_KINDS:
         kind = "other"
     return {"clause": clause.strip()[:ENTRY_VALUE_MAX_CHARS], "kind": kind}
+
+
+# Second-pass verification: skeptical re-review of a flagged page. The
+# first pass optimizes recall; confabulated flags are unstable under
+# adversarial re-questioning while real pen ink is stable (measured on
+# production false positives: blank pages, e-signature fonts, and typed
+# form fill-ins get rejected; confirmed hand alterations survive).
+VERIFICATION_PROMPT = (
+    "A first-pass reviewer claimed this scanned contract page contains a "
+    "handwritten alteration: printed/typed text crossed out and/or replaced "
+    "with pen handwriting. You are the skeptical second reviewer. CONFIRM "
+    "only if you can clearly and unambiguously SEE pen ink that crosses out "
+    "printed text, or handwriting that overwrites or replaces a printed "
+    "value in the document body. Do NOT confirm for: blank or nearly blank "
+    "pages; signatures or e-signature script fonts; typed or "
+    "computer-rendered text of any style, including values sitting on an "
+    "underline in a fill-in blank (that is form-filling, not an alteration, "
+    "even if it looks hand-entered); checked checkboxes; handwriting that "
+    "only fills an empty blank; stamps, smudges, scanner noise, or page "
+    "numbers. If in any doubt, reject. Respond ONLY JSON: "
+    '{"confirmed": true, "reason": "..."} or '
+    '{"confirmed": false, "reason": "..."} with reason under 15 words.'
+)
+
+
+def verify_alterations(
+    page: PageInput, policy: OcrPolicy, first_pass: PageAlterations
+) -> PageAlterations:
+    """Adversarially re-check a flagged page; never raises.
+
+    Returns the first-pass result updated in place semantics-wise:
+    confirmed -> verified True; rejected -> entries cleared and verified
+    False; the verification call itself failing -> flag kept with
+    verified None (fail open: a transport blip must not silently drop a
+    real alteration).
+    """
+
+    if not first_pass.flagged:
+        return first_pass
+    started = time.perf_counter()
+    try:
+        image_url = image_data_url(page.image_path)
+        response, _retries = _complete_vision_with_retries(
+            api_key=os.environ["MISTRAL_API_KEY"],
+            image_url=image_url,
+            model=policy.vision_model,
+            prompt=VERIFICATION_PROMPT,
+        )
+        payload = json.loads(_response_text(response).strip())
+        confirmed = bool(payload.get("confirmed"))
+    except Exception:  # noqa: BLE001 - fail open, keep the flag
+        first_pass.elapsed_ms += round((time.perf_counter() - started) * 1000)
+        return first_pass
+
+    first_pass.elapsed_ms += round((time.perf_counter() - started) * 1000)
+    if confirmed:
+        first_pass.verified = True
+    else:
+        first_pass.alterations = []
+        first_pass.none_found = True
+        first_pass.verified = False
+    return first_pass

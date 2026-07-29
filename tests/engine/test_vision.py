@@ -65,37 +65,39 @@ FOUND = json.dumps(
 NONE_FOUND = json.dumps({"alterations": [], "none_found": True})
 
 
+@pytest.fixture(name="fake_sdk")
+def fake_sdk_fixture(monkeypatch):
+    """Install a scriptable mistralai chat SDK; return (calls, script, reply)."""
+
+    calls = []
+    script = []  # exceptions to raise before finally succeeding
+    reply = {"content": FOUND}
+
+    class FakeChat:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            if script:
+                raise script.pop(0)
+            return chat_response(reply["content"])
+
+    class FakeMistral:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.chat = FakeChat()
+
+    parent = types.ModuleType("mistralai")
+    client_module = types.ModuleType("mistralai.client")
+    client_module.Mistral = FakeMistral
+    parent.client = client_module
+    monkeypatch.setitem(sys.modules, "mistralai", parent)
+    monkeypatch.setitem(sys.modules, "mistralai.client", client_module)
+    monkeypatch.setattr(vision_module, "module_available", lambda _m: True)
+    monkeypatch.setenv("MISTRAL_API_KEY", "k")
+    monkeypatch.setattr(vision_module.time, "sleep", lambda _s: None)
+    return calls, script, reply
+
+
 class TestDetectAlterations:
-    @pytest.fixture(name="fake_sdk")
-    def fake_sdk_fixture(self, monkeypatch):
-        """Install a scriptable mistralai chat SDK; return (calls, script, reply)."""
-
-        calls = []
-        script = []  # exceptions to raise before finally succeeding
-        reply = {"content": FOUND}
-
-        class FakeChat:
-            def complete(self, **kwargs):
-                calls.append(kwargs)
-                if script:
-                    raise script.pop(0)
-                return chat_response(reply["content"])
-
-        class FakeMistral:
-            def __init__(self, api_key):
-                self.api_key = api_key
-                self.chat = FakeChat()
-
-        parent = types.ModuleType("mistralai")
-        client_module = types.ModuleType("mistralai.client")
-        client_module.Mistral = FakeMistral
-        parent.client = client_module
-        monkeypatch.setitem(sys.modules, "mistralai", parent)
-        monkeypatch.setitem(sys.modules, "mistralai.client", client_module)
-        monkeypatch.setattr(vision_module, "module_available", lambda _m: True)
-        monkeypatch.setenv("MISTRAL_API_KEY", "k")
-        monkeypatch.setattr(vision_module.time, "sleep", lambda _s: None)
-        return calls, script, reply
 
     def test_request_shape(self, fake_sdk, tmp_path):
         calls, _script, _reply = fake_sdk
@@ -297,6 +299,77 @@ class TestDetectAlterations:
         result = detect_alterations(make_page(tmp_path), resolve_policy("contracts"))
         assert result.status == "unavailable"
         assert calls == []
+
+
+class TestVerifyAlterations:
+    @staticmethod
+    def flagged() -> PageAlterations:
+        return PageAlterations(
+            status="success",
+            model="mistral-medium-2505",
+            alterations=[{"clause": "4", "kind": "dollar_amount"}],
+            none_found=False,
+        )
+
+    def test_confirmed_keeps_entries(self, fake_sdk, tmp_path):
+        from ocr_engine.vision import verify_alterations
+
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"confirmed": True, "reason": "pen ink"})
+        result = verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        assert result.flagged is True
+        assert result.verified is True
+
+    def test_rejected_clears_entries(self, fake_sdk, tmp_path):
+        from ocr_engine.vision import verify_alterations
+
+        _calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"confirmed": False, "reason": "e-signature"})
+        result = verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        assert result.flagged is False
+        assert result.alterations == []
+        assert result.none_found is True
+        assert result.verified is False
+
+    def test_verification_uses_the_verification_prompt(self, fake_sdk, tmp_path):
+        from ocr_engine.vision import VERIFICATION_PROMPT, verify_alterations
+
+        calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"confirmed": True, "reason": "ok"})
+        verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        content = calls[0]["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": VERIFICATION_PROMPT}
+
+    def test_unflagged_input_skips_the_sdk(self, fake_sdk, tmp_path):
+        from ocr_engine.vision import verify_alterations
+
+        calls, _script, _reply = fake_sdk
+        clean = PageAlterations(
+            status="success", model="m", none_found=True
+        )
+        result = verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), clean
+        )
+        assert result is clean
+        assert calls == []
+
+    def test_transport_failure_fails_open(self, fake_sdk, tmp_path):
+        # A verification blip must not silently drop a real alteration.
+        from ocr_engine.vision import verify_alterations
+
+        _calls, script, _reply = fake_sdk
+        script.append(sdk_error("unauthorized", 401))
+        result = verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        assert result.flagged is True
+        assert result.verified is None
 
 
 class TestRealSdkContract:
