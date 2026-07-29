@@ -17,7 +17,7 @@ from ocr_engine.classification import DIGITAL_TEXT_ENGINE
 from ocr_engine.models import OCRResult, PageAlterations, PageInput
 from ocr_engine.policy import OcrPolicy
 from ocr_engine.review import PageReviewFlags, detect_review_flags
-from ocr_engine.vision import detect_alterations
+from ocr_engine.vision import detect_alterations, verify_alterations
 
 
 @dataclass
@@ -133,6 +133,15 @@ class OcrDocumentResult:
                 if outcome.alterations is not None
                 and outcome.alterations.status != "success"
             ),
+            # First-pass flags cleared by the adversarial verifier — the
+            # production tuning signal for how much false-positive work
+            # the second pass is doing.
+            "vision_rejected_pages": sum(
+                1
+                for outcome in self.pages
+                if outcome.alterations is not None
+                and outcome.alterations.verified is False
+            ),
             "vision_elapsed_ms": sum(
                 outcome.alterations.elapsed_ms
                 for outcome in self.pages
@@ -174,6 +183,13 @@ def run_page(
         if result.status == "success"
         else PageReviewFlags()
     )
+    if alterations is not None and alterations.flagged and policy.vision_verify:
+        # Every flagged page is re-judged from the IMAGE by the adversarial
+        # verifier — including blank-looking pages. OCR text length is
+        # deliberately not used as a shortcut: a badly scanned page with
+        # real pen ink can OCR to almost nothing, and clearing it on that
+        # proxy would silently drop a genuine alteration.
+        alterations = verify_alterations(page, policy, alterations)
     return PageOutcome(
         page_number=page.page_number,
         selected=result,

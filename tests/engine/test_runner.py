@@ -86,6 +86,59 @@ class TestVisionWiring:
         assert outcome.alterations is not None
         assert outcome.alterations.flagged is True
 
+    def test_blank_looking_pages_still_reach_the_verifier(
+        self, tmp_path, monkeypatch
+    ):
+        # OCR text length must NOT shortcut the decision: a bad scan with
+        # real pen ink can OCR to almost nothing, so the image-based
+        # verifier owns the verdict even when the page looks blank.
+        fake_detector(monkeypatch, flagged_alterations())
+        rejected = flagged_alterations()
+        rejected.alterations = []
+        rejected.none_found = True
+        rejected.verified = False
+        verify_calls = []
+
+        def _verify(page, policy, first_pass):
+            verify_calls.append(page.page_number)
+            return rejected
+
+        monkeypatch.setattr(runner_module, "verify_alterations", _verify)
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        registry = {"mistral": FakeEngine("mistral", text="  ")}
+        outcome = run_page(page, registry, POLICY)
+        assert verify_calls == [1]
+        assert outcome.alterations.flagged is False
+        assert outcome.alterations.verified is False
+
+    def test_flagged_pages_are_verified(self, tmp_path, monkeypatch):
+        fake_detector(monkeypatch, flagged_alterations())
+        verified = flagged_alterations()
+        verified.verified = True
+        verify_calls = []
+
+        def _verify(page, policy, first_pass):
+            verify_calls.append(page.page_number)
+            return verified
+
+        monkeypatch.setattr(runner_module, "verify_alterations", _verify)
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        outcome = run_page(page, engines(), POLICY)
+        assert verify_calls == [1]
+        assert outcome.alterations.verified is True
+
+    def test_verification_can_be_disabled_by_policy(self, tmp_path, monkeypatch):
+        fake_detector(monkeypatch, flagged_alterations())
+        monkeypatch.setattr(
+            runner_module,
+            "verify_alterations",
+            lambda *a: (_ for _ in ()).throw(AssertionError("must not verify")),
+        )
+        page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
+        outcome = run_page(page, engines(), OcrPolicy(vision_verify=False))
+        assert outcome.alterations.flagged is True
+        assert outcome.alterations.verified is None
+
     def test_without_key_vision_soft_fails_as_unavailable(self, tmp_path):
         # The real detector, no monkeypatch: the autouse fixture removed the
         # key, so wiring must degrade to a status, never an exception.
@@ -149,6 +202,7 @@ class TestOcrDocumentResult:
         ).summary()
         assert summary["alteration_pages"] == 1
         assert summary["vision_failed_pages"] == 1
+        assert summary["vision_rejected_pages"] == 0
         assert summary["vision_elapsed_ms"] == 6000
         # OCR elapsed stays vision-free for continuity with prior versions.
         assert summary["elapsed_ms"] < 6000

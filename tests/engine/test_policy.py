@@ -76,6 +76,13 @@ class TestVisionPolicy:
                 "contracts", overrides={"vision_model": "mistral-medium-latest"}
             )
 
+    def test_vision_verify_defaults_and_override(self):
+        assert resolve_policy("contracts").vision_verify is True
+        off = resolve_policy("contracts", overrides={"vision_verify": False})
+        assert off.vision_verify is False
+        with pytest.raises(ValueError, match="vision_verify"):
+            resolve_policy("contracts", overrides={"vision_verify": "yes"})
+
     def test_invalid_vision_values_are_rejected(self):
         with pytest.raises(ValueError, match="vision_model"):
             resolve_policy("contracts", overrides={"vision_model": ""})
