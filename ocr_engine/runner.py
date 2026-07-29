@@ -139,6 +139,15 @@ class OcrDocumentResult:
                 if outcome.alterations is not None
                 and outcome.alterations.status != "success"
             ),
+            # First-pass flags cleared by the blank-page guard or the
+            # adversarial verifier — the production tuning signal for how
+            # much false-positive work the second pass is doing.
+            "vision_rejected_pages": sum(
+                1
+                for outcome in self.pages
+                if outcome.alterations is not None
+                and outcome.alterations.verified is False
+            ),
             "vision_elapsed_ms": sum(
                 outcome.alterations.elapsed_ms
                 for outcome in self.pages

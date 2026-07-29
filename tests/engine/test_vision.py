@@ -359,6 +359,21 @@ class TestVerifyAlterations:
         assert result is clean
         assert calls == []
 
+    def test_fenced_verification_response_is_tolerated(self, fake_sdk, tmp_path):
+        # A parse failure fails open and would keep the false positive, so
+        # the verifier must tolerate fenced JSON like the first pass does.
+        from ocr_engine.vision import verify_alterations
+
+        _calls, _script, reply = fake_sdk
+        reply["content"] = (
+            "```json\n" + json.dumps({"confirmed": False, "reason": "x"}) + "\n```"
+        )
+        result = verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        assert result.verified is False
+        assert result.flagged is False
+
     def test_transport_failure_fails_open(self, fake_sdk, tmp_path):
         # A verification blip must not silently drop a real alteration.
         from ocr_engine.vision import verify_alterations

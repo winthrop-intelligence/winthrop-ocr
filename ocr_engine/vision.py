@@ -236,6 +236,18 @@ def _response_text(response: Any) -> str:
     raise ValueError(f"vision response content has unexpected type {type(content).__name__}")
 
 
+def _strip_fences(text: str) -> str:
+    """Remove a Markdown code fence wrapper, tolerated by both parsers."""
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.startswith("json"):
+            cleaned = cleaned[len("json") :]
+        cleaned = cleaned.strip()
+    return cleaned
+
+
 def _parse_alterations(text: str) -> list[dict[str, Any]]:
     """Parse the model's JSON verdict; raises ValueError on any mismatch.
 
@@ -246,12 +258,7 @@ def _parse_alterations(text: str) -> list[dict[str, Any]]:
     the model's own none_found claim is ignored (the caller derives it).
     """
 
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[len("json") :]
-        cleaned = cleaned.strip()
+    cleaned = _strip_fences(text)
     try:
         payload = json.loads(cleaned)
     except json.JSONDecodeError:
@@ -344,7 +351,7 @@ def verify_alterations(
             model=policy.vision_model,
             prompt=VERIFICATION_PROMPT,
         )
-        payload = json.loads(_response_text(response).strip())
+        payload = json.loads(_strip_fences(_response_text(response)))
         confirmed = bool(payload.get("confirmed"))
     except Exception:  # noqa: BLE001 - fail open, keep the flag
         first_pass.elapsed_ms += round((time.perf_counter() - started) * 1000)

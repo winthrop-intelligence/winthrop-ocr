@@ -195,6 +195,7 @@ class TestOcrDocumentResult:
         ).summary()
         assert summary["alteration_pages"] == 1
         assert summary["vision_failed_pages"] == 1
+        assert summary["vision_rejected_pages"] == 0
         assert summary["vision_elapsed_ms"] == 6000
         # OCR elapsed stays vision-free for continuity with prior versions.
         assert summary["elapsed_ms"] < 6000
