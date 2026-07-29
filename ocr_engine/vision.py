@@ -352,7 +352,11 @@ def verify_alterations(
             prompt=VERIFICATION_PROMPT,
         )
         payload = json.loads(_strip_fences(_response_text(response)))
-        confirmed = bool(payload.get("confirmed"))
+        confirmed = payload.get("confirmed")
+        if not isinstance(confirmed, bool):
+            # A missing or mistyped verdict must fail open, not count as a
+            # rejection (bool("false") is True; bool(None) is False).
+            raise ValueError("verification verdict must be a boolean")
     except Exception:  # noqa: BLE001 - fail open, keep the flag
         first_pass.elapsed_ms += round((time.perf_counter() - started) * 1000)
         return first_pass

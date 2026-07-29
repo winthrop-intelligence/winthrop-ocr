@@ -374,6 +374,23 @@ class TestVerifyAlterations:
         assert result.verified is False
         assert result.flagged is False
 
+    def test_missing_or_mistyped_verdict_fails_open(self, fake_sdk, tmp_path):
+        # A missing confirmed field must not count as a rejection, and the
+        # STRING "false" must not count as a confirmation.
+        from ocr_engine.vision import verify_alterations
+
+        _calls, _script, reply = fake_sdk
+        for content in (
+            json.dumps({"reason": "no verdict"}),
+            json.dumps({"confirmed": "false", "reason": "stringly typed"}),
+        ):
+            reply["content"] = content
+            result = verify_alterations(
+                make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+            )
+            assert result.flagged is True
+            assert result.verified is None
+
     def test_transport_failure_fails_open(self, fake_sdk, tmp_path):
         # A verification blip must not silently drop a real alteration.
         from ocr_engine.vision import verify_alterations

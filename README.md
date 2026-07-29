@@ -115,11 +115,11 @@ the struck and replacement values — so values are neither requested nor
 accepted (entries carry only `clause` and `kind`). Route flagged pages to
 human review of the actual scan to read the real values.
 
-Flagged pages pass two false-positive filters before surfacing (v0.4.1):
-a deterministic blank-page guard (a page with no printed text cannot
-carry an altered printed value), and a second adversarial vision call
-that must re-confirm the pen ink (`alt.verified`: True confirmed /
-False rejected-and-cleared / None not-applicable or failed-open).
+Flagged pages must survive a second adversarial vision call before
+surfacing (v0.4.1): a skeptical re-review of the page image that must
+re-confirm the pen ink (`alt.verified`: True confirmed / False
+rejected-and-cleared / None not-applicable or failed-open). Blank
+pages, e-signature fonts, and typed form fill-ins get rejected here.
 Verification adds one call only on flagged pages; disable with
 `overrides={"vision_verify": False}`.
 

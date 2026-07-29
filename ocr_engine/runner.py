@@ -19,12 +19,6 @@ from ocr_engine.policy import OcrPolicy
 from ocr_engine.review import PageReviewFlags, detect_review_flags
 from ocr_engine.vision import detect_alterations, verify_alterations
 
-# A hand alteration requires printed text to alter; a page whose OCR text
-# is (near-)empty cannot carry one, so a vision flag there is suppressed
-# without spending a verification call. Threshold covers stray scanner
-# noise that OCRs to a few characters.
-BLANK_PAGE_MIN_TEXT_CHARS = 25
-
 
 @dataclass
 class PageOutcome:
@@ -139,9 +133,9 @@ class OcrDocumentResult:
                 if outcome.alterations is not None
                 and outcome.alterations.status != "success"
             ),
-            # First-pass flags cleared by the blank-page guard or the
-            # adversarial verifier — the production tuning signal for how
-            # much false-positive work the second pass is doing.
+            # First-pass flags cleared by the adversarial verifier — the
+            # production tuning signal for how much false-positive work
+            # the second pass is doing.
             "vision_rejected_pages": sum(
                 1
                 for outcome in self.pages
@@ -189,18 +183,13 @@ def run_page(
         if result.status == "success"
         else PageReviewFlags()
     )
-    if alterations is not None and alterations.flagged:
-        if (
-            result.status == "success"
-            and len(result.text.strip()) < BLANK_PAGE_MIN_TEXT_CHARS
-        ):
-            # Deterministic guard: nothing printed on the page, so an
-            # "altered printed value" is impossible.
-            alterations.alterations = []
-            alterations.none_found = True
-            alterations.verified = False
-        elif policy.vision_verify:
-            alterations = verify_alterations(page, policy, alterations)
+    if alterations is not None and alterations.flagged and policy.vision_verify:
+        # Every flagged page is re-judged from the IMAGE by the adversarial
+        # verifier — including blank-looking pages. OCR text length is
+        # deliberately not used as a shortcut: a badly scanned page with
+        # real pen ink can OCR to almost nothing, and clearing it on that
+        # proxy would silently drop a genuine alteration.
+        alterations = verify_alterations(page, policy, alterations)
     return PageOutcome(
         page_number=page.page_number,
         selected=result,

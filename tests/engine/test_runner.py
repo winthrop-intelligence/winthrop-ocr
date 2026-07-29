@@ -86,23 +86,30 @@ class TestVisionWiring:
         assert outcome.alterations is not None
         assert outcome.alterations.flagged is True
 
-    def test_blank_page_flag_is_suppressed_without_verification(
+    def test_blank_looking_pages_still_reach_the_verifier(
         self, tmp_path, monkeypatch
     ):
-        # An altered printed value cannot exist on a page with no printed
-        # text; the guard clears the flag and never spends a verify call.
+        # OCR text length must NOT shortcut the decision: a bad scan with
+        # real pen ink can OCR to almost nothing, so the image-based
+        # verifier owns the verdict even when the page looks blank.
         fake_detector(monkeypatch, flagged_alterations())
+        rejected = flagged_alterations()
+        rejected.alterations = []
+        rejected.none_found = True
+        rejected.verified = False
         verify_calls = []
-        monkeypatch.setattr(
-            runner_module, "verify_alterations", lambda *a: verify_calls.append(a)
-        )
+
+        def _verify(page, policy, first_pass):
+            verify_calls.append(page.page_number)
+            return rejected
+
+        monkeypatch.setattr(runner_module, "verify_alterations", _verify)
         page = page_input_for(draw_text_like_page(tmp_path / "p.png"))
         registry = {"mistral": FakeEngine("mistral", text="  ")}
         outcome = run_page(page, registry, POLICY)
+        assert verify_calls == [1]
         assert outcome.alterations.flagged is False
         assert outcome.alterations.verified is False
-        assert outcome.alterations.none_found is True
-        assert verify_calls == []
 
     def test_flagged_pages_are_verified(self, tmp_path, monkeypatch):
         fake_detector(monkeypatch, flagged_alterations())
