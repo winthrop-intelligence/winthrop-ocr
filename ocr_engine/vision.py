@@ -305,27 +305,89 @@ def _validated_entry(entry: Any) -> dict[str, Any] | None:
     return {"clause": clause.strip()[:ENTRY_VALUE_MAX_CHARS], "kind": kind}
 
 
-# Second-pass verification: skeptical re-review of a flagged page. The
-# first pass optimizes recall; confabulated flags are unstable under
-# adversarial re-questioning while real pen ink is stable (measured on
-# production false positives: blank pages, e-signature fonts, and typed
-# form fill-ins get rejected; confirmed hand alterations survive).
+# Second-pass verification: skeptical re-review of a flagged page, guided
+# by three labeled example pages shipped with the package (few-shot).
+# Measured on production false positives: text-only skeptical prompts
+# could not reject pen-filled form blanks without losing real
+# alterations; showing the model an actual "pen fills form fields - NOT
+# an alteration" page alongside real struck-amount and struck-date pages
+# rejects every false-positive class while keeping bold alterations.
+# Known limitation (accepted, precision-first product decision): very
+# subtle alterations - a thin strike through a small token like "TBA" -
+# can be rejected too.
 VERIFICATION_PROMPT = (
-    "A first-pass reviewer claimed this scanned contract page contains a "
-    "handwritten alteration: printed/typed text crossed out and/or replaced "
-    "with pen handwriting. You are the skeptical second reviewer. CONFIRM "
-    "only if you can clearly and unambiguously SEE pen ink that crosses out "
-    "printed text, or handwriting that overwrites or replaces a printed "
-    "value in the document body. Do NOT confirm for: blank or nearly blank "
-    "pages; signatures or e-signature script fonts; typed or "
-    "computer-rendered text of any style, including values sitting on an "
-    "underline in a fill-in blank (that is form-filling, not an alteration, "
-    "even if it looks hand-entered); checked checkboxes; handwriting that "
-    "only fills an empty blank; stamps, smudges, scanner noise, or page "
-    "numbers. If in any doubt, reject. Respond ONLY JSON: "
+    "You verify claimed handwritten alterations on scanned contract pages. "
+    "An ALTERATION means pen ink crosses out a printed/typed value or writes "
+    "over it to replace it - the key question is whether a PRINTED value "
+    "existed and was displaced. Pen ink that only fills empty blanks, form "
+    "fields, signature lines, name/title/date/phone lines, or checkboxes is "
+    "NOT an alteration (nothing printed was displaced). Redaction bars, "
+    "highlighter, stamps, scanner noise are NOT alterations. Study the three "
+    "labeled EXAMPLE pages, then judge the FINAL page. Respond ONLY JSON: "
     '{"confirmed": true, "reason": "..."} or '
     '{"confirmed": false, "reason": "..."} with reason under 15 words.'
 )
+
+_EXAMPLE_LABELS_AND_FILES = (
+    (
+        "EXAMPLE 1 - NOT an alteration: pen only fills signature/form "
+        "fields; no printed value displaced:",
+        "example_not_alteration_form_fills.jpg",
+    ),
+    (
+        "EXAMPLE 2 - IS an alteration: printed dollar amount struck out "
+        "and replaced, initialed:",
+        "example_alteration_struck_amount.jpg",
+    ),
+    (
+        "EXAMPLE 3 - IS an alteration: printed date crossed out with a "
+        "handwritten replacement date:",
+        "example_alteration_struck_date.jpg",
+    ),
+)
+
+_example_content_cache: list[dict[str, Any]] | None = None
+
+
+def _example_content() -> list[dict[str, Any]]:
+    """The labeled example chunks, base64-encoded once per process."""
+
+    global _example_content_cache  # pylint: disable=global-statement
+    if _example_content_cache is None:
+        import base64  # pylint: disable=import-outside-toplevel
+        from importlib.resources import files  # pylint: disable=import-outside-toplevel
+
+        chunks: list[dict[str, Any]] = []
+        for label, filename in _EXAMPLE_LABELS_AND_FILES:
+            raw = (files("ocr_engine") / "data" / filename).read_bytes()
+            encoded = base64.b64encode(raw).decode("ascii")
+            chunks.append({"type": "text", "text": label})
+            chunks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+                }
+            )
+        _example_content_cache = chunks
+    return _example_content_cache
+
+
+def _verification_request_kwargs(*, model: str, image_url: str) -> dict[str, Any]:
+    """The few-shot verification request: instructions, examples, target."""
+
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": VERIFICATION_PROMPT},
+        *_example_content(),
+        {"type": "text", "text": "FINAL page to judge:"},
+        {"type": "image_url", "image_url": image_url},
+    ]
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "timeout_ms": VISION_ATTEMPT_TIMEOUT_MS,
+    }
 
 
 def verify_alterations(
@@ -344,13 +406,26 @@ def verify_alterations(
         return first_pass
     started = time.perf_counter()
     try:
-        image_url = image_data_url(page.image_path)
-        response, _retries = _complete_vision_with_retries(
-            api_key=os.environ["MISTRAL_API_KEY"],
-            image_url=image_url,
+        # pylint: disable-next=import-outside-toplevel,import-error
+        from mistralai.client import Mistral
+
+        request = _verification_request_kwargs(
             model=policy.vision_model,
-            prompt=VERIFICATION_PROMPT,
+            image_url=image_data_url(page.image_path),
         )
+        api_key = os.environ["MISTRAL_API_KEY"]
+        response = None
+        for attempt in range(VISION_MAX_ATTEMPTS):
+            try:
+                client = Mistral(api_key=api_key)
+                response = client.chat.complete(**request)
+                break
+            except Exception as exc:
+                if attempt == VISION_MAX_ATTEMPTS - 1 or not is_retryable_mistral_error(
+                    exc
+                ):
+                    raise
+                time.sleep(retry_delay(exc, attempt))
         payload = json.loads(_strip_fences(_response_text(response)))
         confirmed = payload.get("confirmed")
         if not isinstance(confirmed, bool):

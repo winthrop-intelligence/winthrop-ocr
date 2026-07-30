@@ -335,6 +335,25 @@ class TestVerifyAlterations:
         assert result.none_found is True
         assert result.verified is False
 
+    def test_verification_request_is_few_shot(self, fake_sdk, tmp_path):
+        # Instructions + 3 labeled packaged examples + the target page.
+        from ocr_engine.vision import verify_alterations
+
+        calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"confirmed": True, "reason": "ok"})
+        verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        content = calls[0]["messages"][0]["content"]
+        images = [c for c in content if c["type"] == "image_url"]
+        assert len(images) == 4
+        # Examples come from package data (jpeg); the target is the page png.
+        assert all(
+            i["image_url"]["url"].startswith("data:image/jpeg;base64,")
+            for i in images[:3]
+        )
+        assert images[3]["image_url"].startswith("data:image/png;base64,")
+
     def test_verification_uses_the_verification_prompt(self, fake_sdk, tmp_path):
         from ocr_engine.vision import VERIFICATION_PROMPT, verify_alterations
 
@@ -345,6 +364,7 @@ class TestVerifyAlterations:
         )
         content = calls[0]["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": VERIFICATION_PROMPT}
+        assert content[-2] == {"type": "text", "text": "FINAL page to judge:"}
 
     def test_unflagged_input_skips_the_sdk(self, fake_sdk, tmp_path):
         from ocr_engine.vision import verify_alterations
