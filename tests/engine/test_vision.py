@@ -474,6 +474,42 @@ class TestRealSdkContract:
         chunk_types = [type(c).__name__ for c in validated.messages[0].content]
         assert chunk_types == ["TextChunk", "ImageURLChunk"]
 
+    def test_verification_request_binds_and_validates_against_the_real_sdk(self):
+        """The multi-image few-shot payload must also survive SDK evolution.
+
+        If an SDK upgrade changed the multi-image content schema, every
+        second-pass request would fail open in production (flags kept,
+        never verified) with CI green - so bind the exact verification
+        request against the real client signature AND run it through the
+        SDK's typed request model.
+        """
+
+        import inspect
+
+        pytest.importorskip("mistralai")
+        from mistralai.client import Mistral, models  # pylint: disable=import-error
+
+        from ocr_engine.vision import _verification_request_kwargs
+
+        client = Mistral(api_key="test-key")  # construction is offline
+        request = _verification_request_kwargs(
+            model="mistral-medium-2505",
+            image_url="data:image/png;base64,x",
+        )
+        inspect.signature(client.chat.complete).bind(**request)
+
+        request.pop("timeout_ms")
+        validated = models.ChatCompletionRequest(**request)  # raises on mismatch
+        chunk_types = [type(c).__name__ for c in validated.messages[0].content]
+        # Instructions, 3 labeled examples (text+image), final label, target.
+        assert chunk_types == [
+            "TextChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+        ]
+
 
 class TestPageAlterationsModel:
     def test_roundtrip(self):
