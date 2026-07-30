@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
-POLICY_VERSION = "2026-07-29"
+POLICY_VERSION = "2026-07-30"
 
 DPI_MIN, DPI_MAX = 72, 600
 

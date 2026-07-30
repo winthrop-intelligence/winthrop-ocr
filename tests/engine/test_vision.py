@@ -335,6 +335,25 @@ class TestVerifyAlterations:
         assert result.none_found is True
         assert result.verified is False
 
+    def test_verification_request_is_few_shot(self, fake_sdk, tmp_path):
+        # Instructions + 3 labeled packaged examples + the target page.
+        from ocr_engine.vision import verify_alterations
+
+        calls, _script, reply = fake_sdk
+        reply["content"] = json.dumps({"confirmed": True, "reason": "ok"})
+        verify_alterations(
+            make_page(tmp_path), resolve_policy("contracts"), self.flagged()
+        )
+        content = calls[0]["messages"][0]["content"]
+        images = [c for c in content if c["type"] == "image_url"]
+        assert len(images) == 4
+        # Examples come from package data (jpeg); the target is the page png.
+        assert all(
+            i["image_url"]["url"].startswith("data:image/jpeg;base64,")
+            for i in images[:3]
+        )
+        assert images[3]["image_url"].startswith("data:image/png;base64,")
+
     def test_verification_uses_the_verification_prompt(self, fake_sdk, tmp_path):
         from ocr_engine.vision import VERIFICATION_PROMPT, verify_alterations
 
@@ -345,6 +364,7 @@ class TestVerifyAlterations:
         )
         content = calls[0]["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": VERIFICATION_PROMPT}
+        assert content[-2] == {"type": "text", "text": "FINAL page to judge:"}
 
     def test_unflagged_input_skips_the_sdk(self, fake_sdk, tmp_path):
         from ocr_engine.vision import verify_alterations
@@ -453,6 +473,42 @@ class TestRealSdkContract:
         validated = models.ChatCompletionRequest(**request)  # raises on mismatch
         chunk_types = [type(c).__name__ for c in validated.messages[0].content]
         assert chunk_types == ["TextChunk", "ImageURLChunk"]
+
+    def test_verification_request_binds_and_validates_against_the_real_sdk(self):
+        """The multi-image few-shot payload must also survive SDK evolution.
+
+        If an SDK upgrade changed the multi-image content schema, every
+        second-pass request would fail open in production (flags kept,
+        never verified) with CI green - so bind the exact verification
+        request against the real client signature AND run it through the
+        SDK's typed request model.
+        """
+
+        import inspect
+
+        pytest.importorskip("mistralai")
+        from mistralai.client import Mistral, models  # pylint: disable=import-error
+
+        from ocr_engine.vision import _verification_request_kwargs
+
+        client = Mistral(api_key="test-key")  # construction is offline
+        request = _verification_request_kwargs(
+            model="mistral-medium-2505",
+            image_url="data:image/png;base64,x",
+        )
+        inspect.signature(client.chat.complete).bind(**request)
+
+        request.pop("timeout_ms")
+        validated = models.ChatCompletionRequest(**request)  # raises on mismatch
+        chunk_types = [type(c).__name__ for c in validated.messages[0].content]
+        # Instructions, 3 labeled examples (text+image), final label, target.
+        assert chunk_types == [
+            "TextChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+            "TextChunk", "ImageURLChunk",
+        ]
 
 
 class TestPageAlterationsModel:
