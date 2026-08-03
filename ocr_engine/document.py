@@ -65,6 +65,11 @@ class OcrDocumentError(Exception):
       ``exception`` for worker crashes. A document whose failures are all
       ``rate_limited``/``auth_error`` indicates a provider/config problem
       (retry later / fix credentials) rather than a bad document.
+
+    :class:`UnreadableDocumentError` (a subclass) marks the input document
+    itself as unparseable — deterministic bad input that no retry can fix.
+    Every plain ``OcrDocumentError`` is environmental or provider-side and
+    therefore worth retrying (or a config fix).
     """
 
     def __init__(
@@ -79,6 +84,17 @@ class OcrDocumentError(Exception):
         self.failed_pages = list(failed_pages or [])
         self.page_count = page_count
         self.status_counts = dict(status_counts or {})
+
+
+class UnreadableDocumentError(OcrDocumentError):
+    """The document itself cannot be parsed; a retry can never succeed.
+
+    Raised pre-flight when the input is deterministically bad: the PDF's
+    structure is unreadable (pdfinfo rejects the bytes) or it reports no
+    pages. Environmental pre-flight failures — missing file, unavailable
+    engine, missing Poppler, a pdfinfo timeout — stay plain
+    :class:`OcrDocumentError` because retrying them can succeed.
+    """
 
 
 def ocr_document(
@@ -119,7 +135,9 @@ def ocr_document(
     requires neither the OCR engine's credentials nor ``pdftoppm`` — those
     dependencies are checked only when at least one page takes the
     render+OCR path. Raises :class:`OcrDocumentError` when the
-    source is unusable, the engine is unavailable, or ANY page fails —
+    source is unusable, the engine is unavailable, or ANY page fails
+    (:class:`UnreadableDocumentError` when the document itself is
+    unparseable and retrying is pointless) —
     partial documents are never returned, so callers can treat a return
     value as complete. Once a document is doomed, still-queued pages are
     cancelled rather than processed.
@@ -142,15 +160,7 @@ def ocr_document(
         raise OcrDocumentError(f"no engine registered as {policy.engine!r}")
 
     is_pdf = _is_pdf(source)
-    if is_pdf:
-        try:
-            page_count = pdf_page_count(source)
-        except Exception as exc:
-            raise OcrDocumentError(f"could not read PDF {source.name}: {exc}") from exc
-        if page_count < 1:
-            raise OcrDocumentError(f"PDF {source.name} reports no pages")
-    else:
-        page_count = 1
+    page_count = _preflight_page_count(source) if is_pdf else 1
 
     try:
         identifier = document_id(source)
@@ -232,6 +242,25 @@ def ocr_document(
         pages=[outcomes[number] for number in sorted(outcomes)],
         policy_fingerprint=policy.fingerprint(),
     )
+
+
+def _preflight_page_count(source: Path) -> int:
+    """Read the PDF page count, splitting bad input from retryable failures."""
+
+    try:
+        page_count = pdf_page_count(source)
+    except ValueError as exc:
+        # run_sandboxed raises ValueError only when the tool itself rejected
+        # the input; tool-missing (RuntimeError) and timeout (TimeoutExpired)
+        # land in the retryable branch below.
+        raise UnreadableDocumentError(
+            f"could not read PDF {source.name}: {exc}"
+        ) from exc
+    except Exception as exc:
+        raise OcrDocumentError(f"could not read PDF {source.name}: {exc}") from exc
+    if page_count < 1:
+        raise UnreadableDocumentError(f"PDF {source.name} reports no pages")
+    return page_count
 
 
 def _preflight_classifications(

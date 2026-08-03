@@ -5,7 +5,7 @@ can install it from a git tag and run OCR in-process.
 
 The supported import surface is this package root::
 
-    from ocr_engine import OcrDocumentError, ocr_document
+    from ocr_engine import OcrDocumentError, UnreadableDocumentError, ocr_document
 
 Submodule paths are internal layout and may move between minor versions.
 """
@@ -13,7 +13,11 @@ Submodule paths are internal layout and may move between minor versions.
 import logging
 
 from ocr_engine.classification import DIGITAL_TEXT_ENGINE
-from ocr_engine.document import OcrDocumentError, ocr_document
+from ocr_engine.document import (
+    OcrDocumentError,
+    UnreadableDocumentError,
+    ocr_document,
+)
 from ocr_engine.models import OCRResult, PageAlterations
 from ocr_engine.policy import POLICY_VERSION, OcrPolicy, resolve_policy
 from ocr_engine.review import PageReviewFlags, detect_review_flags
@@ -29,6 +33,7 @@ __all__ = [
     "PageAlterations",
     "PageOutcome",
     "PageReviewFlags",
+    "UnreadableDocumentError",
     "detect_review_flags",
     "ocr_document",
     "resolve_policy",
