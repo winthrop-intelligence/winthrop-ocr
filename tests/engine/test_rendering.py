@@ -101,6 +101,25 @@ class TestPdfPageSize:
         with pytest.raises(ValueError):
             rendering.pdf_page_size(bogus, 1)
 
+    def test_missing_page_raises_value_error(self, tmp_path):
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=2)
+        with pytest.raises(ValueError, match="page 99"):
+            rendering.pdf_page_size(pdf, 99)
+
+    def test_one_pdfinfo_probe_per_document(self, tmp_path, monkeypatch):
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=3)
+        spawned = []
+        real_run_sandboxed = rendering.run_sandboxed
+
+        def counting_run_sandboxed(arguments, **kwargs):
+            spawned.append(arguments[0])
+            return real_run_sandboxed(arguments, **kwargs)
+
+        monkeypatch.setattr(rendering, "run_sandboxed", counting_run_sandboxed)
+        for page_number in (1, 2, 3):
+            assert rendering.pdf_page_size(pdf, page_number)
+        assert spawned.count("pdfinfo") == 1
+
 
 class TestRenderDpiClamp:
     """render_page_input renders at the effective, size-aware DPI."""

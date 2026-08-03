@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 
 from ocr_engine.models import PageInput
@@ -29,11 +30,16 @@ STDERR_EXCERPT_CHARS = 300
 # claims, so no DPI floor is allowed to override it.
 MAX_RENDER_DIM_PX = 4200
 
-# "Page size:" for whole-document runs, "Page    N size:" under -f/-l.
-_PAGE_SIZE_PATTERN = re.compile(
-    r"^Page(?:\s+\d+)?\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts",
+# Under -f/-l pdfinfo prints one numbered line per page:
+# "Page    N size:  W x H pts".
+_NUMBERED_PAGE_SIZE_PATTERN = re.compile(
+    r"^Page\s+(\d+)\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts",
     flags=re.MULTILINE,
 )
+
+# pdfinfo clamps -l to the real page count, so one generous last-page
+# bound reads every page's size in a single invocation.
+_ALL_PAGES_BOUND = 100_000
 
 
 def sha256_file(path: Path) -> str:
@@ -134,20 +140,42 @@ def pdf_page_count(pdf_path: Path) -> int:
     return int(match.group(1))
 
 
+@lru_cache(maxsize=8)
+def _document_page_sizes(
+    path_str: str, _file_size: int, _file_mtime_ns: int
+) -> dict[int, tuple[float, float]]:
+    """Every page's declared size from ONE pdfinfo run, cached per document.
+
+    The stat fields exist only to key the cache: a rewritten file at the
+    same path probes again. Threaded page workers may race the first
+    probe (bounded duplicate work); every later page hits the cache, so
+    rendering an N-page document costs one probe, not N.
+    """
+
+    output = run_sandboxed(
+        ["pdfinfo", "-f", "1", "-l", str(_ALL_PAGES_BOUND), path_str],
+        timeout=30,
+        failure=f"pdfinfo could not read page sizes of {Path(path_str).name}",
+    ).decode("utf-8", errors="replace")
+    return {
+        int(number): (float(width), float(height))
+        for number, width, height in _NUMBERED_PAGE_SIZE_PATTERN.findall(output)
+    }
+
+
 def pdf_page_size(pdf_path: Path, page_number: int) -> tuple[float, float]:
     """Read one page's declared size in points via pdfinfo (memory-capped)."""
 
-    output = run_sandboxed(
-        ["pdfinfo", "-f", str(page_number), "-l", str(page_number), str(pdf_path)],
-        timeout=30,
-        failure=f"pdfinfo could not read page {page_number} of {pdf_path.name}",
-    ).decode("utf-8", errors="replace")
-    match = _PAGE_SIZE_PATTERN.search(output)
-    if not match:
+    stat = pdf_path.stat()
+    sizes = _document_page_sizes(
+        str(pdf_path.resolve()), stat.st_size, stat.st_mtime_ns
+    )
+    size = sizes.get(page_number)
+    if size is None:
         raise ValueError(
             f"could not read page {page_number} size from {pdf_path.name}"
         )
-    return float(match.group(1)), float(match.group(2))
+    return size
 
 
 def bounded_dpi(width_pts: float, height_pts: float, requested_dpi: int) -> int:
