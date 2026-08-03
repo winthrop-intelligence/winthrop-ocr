@@ -68,8 +68,10 @@ class OcrDocumentError(Exception):
 
     :class:`UnreadableDocumentError` (a subclass) marks the input document
     itself as unparseable — deterministic bad input that no retry can fix.
-    Every plain ``OcrDocumentError`` is environmental or provider-side and
-    therefore worth retrying (or a config fix).
+    Other ``OcrDocumentError`` cases are environmental, provider-side, or
+    caller/config problems (missing file, invalid profile, unavailable
+    engine): recoverable by retrying or fixing the setup, never grounds to
+    give up on the document.
     """
 
     def __init__(
@@ -92,8 +94,9 @@ class UnreadableDocumentError(OcrDocumentError):
     Raised pre-flight when the input is deterministically bad: the PDF's
     structure is unreadable (pdfinfo rejects the bytes) or it reports no
     pages. Environmental pre-flight failures — missing file, unavailable
-    engine, missing Poppler, a pdfinfo timeout — stay plain
-    :class:`OcrDocumentError` because retrying them can succeed.
+    engine, missing Poppler, sandbox setup failures, a pdfinfo timeout —
+    stay plain :class:`OcrDocumentError` because retrying or fixing the
+    environment can succeed.
     """
 
 
@@ -250,9 +253,10 @@ def _preflight_page_count(source: Path) -> int:
     try:
         page_count = pdf_page_count(source)
     except ValueError as exc:
-        # run_sandboxed raises ValueError only when the tool itself rejected
-        # the input; tool-missing (RuntimeError) and timeout (TimeoutExpired)
-        # land in the retryable branch below.
+        # ValueError is pdfinfo's verdict on the input: run_sandboxed maps
+        # environmental failures (tool missing, sandbox setup/exec failure,
+        # death by signal) to RuntimeError, and a hung pdfinfo raises
+        # TimeoutExpired — both land in the retryable branch below.
         raise UnreadableDocumentError(
             f"could not read PDF {source.name}: {exc}"
         ) from exc

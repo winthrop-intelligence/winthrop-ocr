@@ -63,9 +63,12 @@ def run_sandboxed(
     The canonical process adapter for every tool that decodes untrusted
     PDFs — the Poppler CLI (pdfinfo, pdftoppm, pdfimages, pdftotext) and
     the pdfplumber vector scan: one command assembly, one error
-    normalization. Exit code 127 (tool missing) raises ``RuntimeError``
-    naming the tool plus ``install_hint``; any other failure raises
-    ``ValueError`` built from ``failure`` plus the stderr tail.
+    normalization. Environmental failures raise ``RuntimeError``: exit
+    code 127 (tool missing, named with ``install_hint``), the sandbox's
+    own exit codes (memory-limit setup or exec failure), and death by
+    signal. Only a tool that ran to completion and failed raises
+    ``ValueError`` built from ``failure`` plus the stderr tail — callers
+    may read ``ValueError`` as the tool's verdict on the input itself.
     """
 
     # pylint: disable-next=import-outside-toplevel
@@ -88,6 +91,14 @@ def run_sandboxed(
     except subprocess.CalledProcessError as exc:
         if exc.returncode == subprocess_runner.COMMAND_NOT_FOUND_EXIT_CODE:
             raise RuntimeError(f"{tool} is required; {install_hint}") from exc
+        sandbox_failures = (
+            subprocess_runner.MEMORY_LIMIT_SETUP_FAILURE_EXIT_CODE,
+            subprocess_runner.COMMAND_EXEC_FAILURE_EXIT_CODE,
+        )
+        if exc.returncode in sandbox_failures or exc.returncode < 0:
+            raise RuntimeError(
+                f"sandbox could not run {tool} ({_stderr_excerpt(exc)})"
+            ) from exc
         raise ValueError(f"{failure} ({_stderr_excerpt(exc)})") from exc
 
 
