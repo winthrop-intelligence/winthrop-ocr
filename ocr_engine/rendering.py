@@ -3,19 +3,43 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 
 from ocr_engine.models import PageInput
+
+logger = logging.getLogger(__name__)
 
 # Poppler tools decode untrusted PDFs; cap their memory (Linux; no-op
 # elsewhere) so a crafted document cannot OOM the host.
 POPPLER_MEMORY_LIMIT_BYTES = 1536 * 1024 * 1024
 
 STDERR_EXCERPT_CHARS = 300
+
+# Cap the longest rendered side so one abnormally large page (a phone-scan
+# "poster" declaring 1 px = 1 pt) cannot explode into an 80+ megapixel
+# raster that blows the pdftoppm timeout. 4200 px is calibrated so letter
+# AND legal pages (longest side <= 14 in = 1008 pts) keep a full 300 DPI —
+# only larger-than-legal pages clamp at all. The cap is absolute: a 4200 px
+# output carries ample pixels for OCR whatever physical size the page
+# claims, so no DPI floor is allowed to override it.
+MAX_RENDER_DIM_PX = 4200
+
+# Under -f/-l pdfinfo prints one numbered line per page:
+# "Page    N size:  W x H pts".
+_NUMBERED_PAGE_SIZE_PATTERN = re.compile(
+    r"^Page\s+(\d+)\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts",
+    flags=re.MULTILINE,
+)
+
+# pdfinfo clamps -l to the real page count, so one generous last-page
+# bound reads every page's size in a single invocation.
+_ALL_PAGES_BOUND = 100_000
 
 
 def sha256_file(path: Path) -> str:
@@ -116,6 +140,100 @@ def pdf_page_count(pdf_path: Path) -> int:
     return int(match.group(1))
 
 
+@lru_cache(maxsize=8)
+def _document_page_sizes(
+    path_str: str, _file_size: int, _file_mtime_ns: int
+) -> dict[int, tuple[float, float]]:
+    """Every page's declared size from ONE pdfinfo run, cached per document.
+
+    The stat fields exist only to key the cache: a rewritten file at the
+    same path probes again. Threaded page workers may race the first
+    probe (bounded duplicate work); every later page hits the cache, so
+    rendering an N-page document costs one probe, not N.
+    """
+
+    output = run_sandboxed(
+        ["pdfinfo", "-f", "1", "-l", str(_ALL_PAGES_BOUND), path_str],
+        timeout=30,
+        failure=f"pdfinfo could not read page sizes of {Path(path_str).name}",
+    ).decode("utf-8", errors="replace")
+    return {
+        int(number): (float(width), float(height))
+        for number, width, height in _NUMBERED_PAGE_SIZE_PATTERN.findall(output)
+    }
+
+
+def pdf_page_size(pdf_path: Path, page_number: int) -> tuple[float, float]:
+    """Read one page's declared size in points via pdfinfo (memory-capped)."""
+
+    stat = pdf_path.stat()
+    sizes = _document_page_sizes(
+        str(pdf_path.resolve()), stat.st_size, stat.st_mtime_ns
+    )
+    size = sizes.get(page_number)
+    if size is None:
+        raise ValueError(
+            f"could not read page {page_number} size from {pdf_path.name}"
+        )
+    return size
+
+
+def bounded_dpi(width_pts: float, height_pts: float, requested_dpi: int) -> int:
+    """The largest DPI (never above requested) that keeps the longest
+    rendered side within ``MAX_RENDER_DIM_PX``.
+
+    Floored only at pdftoppm's minimum of 1 DPI, which holds the cap for
+    any page up to 4200 inches — 25x the PDF spec's own 200-inch page
+    limit. Anything beyond that renders at 1 DPI and is bounded by the
+    sandbox's memory cap and timeout like every other pathological input.
+    """
+
+    longest_pts = max(width_pts, height_pts)
+    if longest_pts <= 0:
+        return requested_dpi
+    cap = int(MAX_RENDER_DIM_PX * 72 / longest_pts)
+    return min(requested_dpi, max(1, cap))
+
+
+def _effective_render_dpi(
+    pdf_path: Path, page_number: int, requested_dpi: int
+) -> int:
+    """Clamp the render DPI to the page's physical size.
+
+    The size probe is best-effort: if pdfinfo cannot report this page's
+    size, keep the requested DPI and let the render itself succeed or
+    fail — the probe must never take down a page the renderer could
+    have handled.
+    """
+
+    try:
+        width_pts, height_pts = pdf_page_size(pdf_path, page_number)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug(
+            "Page-size probe failed for page %d of %s; keeping %d DPI",
+            page_number,
+            pdf_path.name,
+            requested_dpi,
+        )
+        return requested_dpi
+    dpi = bounded_dpi(width_pts, height_pts, requested_dpi)
+    if dpi < requested_dpi:
+        logger.warning(
+            "Clamping render DPI for page %d of %s: %.0f x %.0f pts "
+            "(%.1f x %.1f in) would exceed %d px at %d DPI; rendering at %d DPI",
+            page_number,
+            pdf_path.name,
+            width_pts,
+            height_pts,
+            width_pts / 72,
+            height_pts / 72,
+            MAX_RENDER_DIM_PX,
+            requested_dpi,
+            dpi,
+        )
+    return dpi
+
+
 def render_pdf_page(
     pdf_path: Path, page_number: int, output_path: Path, dpi: int
 ) -> None:
@@ -149,10 +267,16 @@ def render_page_input(
     dpi: int = 300,
     identifier: str | None = None,
 ) -> PageInput:
-    """Render a single PDF page and return its canonical PageInput record."""
+    """Render a single PDF page and return its canonical PageInput record.
+
+    ``dpi`` is the requested ceiling; abnormally large pages render at a
+    lower effective DPI (see ``bounded_dpi``) and the returned record's
+    ``dpi`` field reports the value actually used.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     image_path = output_dir / f"page-{page_number:04d}.png"
+    dpi = _effective_render_dpi(pdf_path, page_number, dpi)
     render_pdf_page(pdf_path, page_number, image_path, dpi)
     return PageInput(
         document_id=identifier or document_id(pdf_path),
