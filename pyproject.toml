@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "winthrop-ocr"
-version = "0.4.3"
+version = "0.4.4"
 description = "OCR library: render PDF pages and extract text with per-page confidence via Mistral OCR"
 authors = ["Winthrop Intelligence"]
 readme = "README.md"
