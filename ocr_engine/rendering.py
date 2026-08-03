@@ -24,12 +24,10 @@ STDERR_EXCERPT_CHARS = 300
 # "poster" declaring 1 px = 1 pt) cannot explode into an 80+ megapixel
 # raster that blows the pdftoppm timeout. 4200 px is calibrated so letter
 # AND legal pages (longest side <= 14 in = 1008 pts) keep a full 300 DPI —
-# only larger-than-legal pages clamp at all.
+# only larger-than-legal pages clamp at all. The cap is absolute: a 4200 px
+# output carries ample pixels for OCR whatever physical size the page
+# claims, so no DPI floor is allowed to override it.
 MAX_RENDER_DIM_PX = 4200
-
-# Never clamp below this: even an absurd declared page size must still
-# produce an image OCR can attempt.
-MIN_RENDER_DPI = 50
 
 # "Page size:" for whole-document runs, "Page    N size:" under -f/-l.
 _PAGE_SIZE_PATTERN = re.compile(
@@ -154,13 +152,19 @@ def pdf_page_size(pdf_path: Path, page_number: int) -> tuple[float, float]:
 
 def bounded_dpi(width_pts: float, height_pts: float, requested_dpi: int) -> int:
     """The largest DPI (never above requested) that keeps the longest
-    rendered side within ``MAX_RENDER_DIM_PX``."""
+    rendered side within ``MAX_RENDER_DIM_PX``.
+
+    Floored only at pdftoppm's minimum of 1 DPI, which holds the cap for
+    any page up to 4200 inches — 25x the PDF spec's own 200-inch page
+    limit. Anything beyond that renders at 1 DPI and is bounded by the
+    sandbox's memory cap and timeout like every other pathological input.
+    """
 
     longest_pts = max(width_pts, height_pts)
     if longest_pts <= 0:
         return requested_dpi
     cap = int(MAX_RENDER_DIM_PX * 72 / longest_pts)
-    return min(requested_dpi, max(MIN_RENDER_DPI, cap))
+    return min(requested_dpi, max(1, cap))
 
 
 def _effective_render_dpi(

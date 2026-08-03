@@ -68,13 +68,20 @@ class TestBoundedDpi:
         # be an ~84 MP render; the clamp keeps the longest side <= 4200 px.
         assert rendering.bounded_dpi(1892.32, 2544.4, 300) == 118
 
-    def test_absurd_page_size_clamps_to_floor(self):
-        assert (
-            rendering.bounded_dpi(100_000, 100_000, 300) == rendering.MIN_RENDER_DPI
-        )
+    def test_pixel_cap_is_absolute(self):
+        # No declared size may push the longest rendered side past the cap
+        # (until the 1-DPI floor, far beyond the PDF spec's page limit).
+        for longest_pts in (2544.4, 8000, 20_000, 100_000, 302_400):
+            dpi = rendering.bounded_dpi(longest_pts, longest_pts, 300)
+            assert dpi * longest_pts / 72 <= rendering.MAX_RENDER_DIM_PX
 
-    def test_floor_never_raises_above_requested(self):
-        assert rendering.bounded_dpi(100_000, 100_000, 30) == 30
+    def test_absurd_page_size_still_honors_pixel_cap(self):
+        # Greptile P1 regression: a 100000-pt page must NOT render at a
+        # floor DPI that overflows the cap (50 DPI would be ~69444 px).
+        assert rendering.bounded_dpi(100_000, 100_000, 300) == 3
+
+    def test_impossible_page_size_floors_at_one_dpi(self):
+        assert rendering.bounded_dpi(1_000_000, 1_000_000, 300) == 1
 
     def test_degenerate_size_keeps_requested_dpi(self):
         assert rendering.bounded_dpi(0, 0, 300) == 300
