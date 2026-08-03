@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
-from ocr_engine import document
+from ocr_engine import UnreadableDocumentError, document
 from ocr_engine.document import OcrDocumentError, ocr_document
 
 from tests.conftest import (
@@ -497,14 +499,41 @@ class TestStrictFailures:
             ocr_document(pdf, profile="nope")
 
     def test_missing_file_raises(self, tmp_path, fake_registry):
-        with pytest.raises(OcrDocumentError, match="does not exist"):
+        with pytest.raises(OcrDocumentError, match="does not exist") as excinfo:
             ocr_document(tmp_path / "ghost.pdf")
+        assert not isinstance(excinfo.value, UnreadableDocumentError)
 
-    def test_unreadable_pdf_bytes_raise(self, tmp_path, fake_registry):
+    def test_unreadable_pdf_bytes_raise_unreadable(self, tmp_path, fake_registry):
         bogus = tmp_path / "broken.pdf"
         bogus.write_bytes(b"%PDF-not really a pdf")
-        with pytest.raises(OcrDocumentError, match="could not read PDF"):
+        with pytest.raises(UnreadableDocumentError, match="could not read PDF"):
             ocr_document(bogus)
+
+    def test_zero_page_pdf_raises_unreadable(self, tmp_path, fake_registry, monkeypatch):
+        monkeypatch.setattr(document, "pdf_page_count", lambda _source: 0)
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=1)
+        with pytest.raises(UnreadableDocumentError, match="reports no pages"):
+            ocr_document(pdf)
+
+    def test_pdfinfo_timeout_stays_retryable(self, tmp_path, fake_registry, monkeypatch):
+        def raise_timeout(_source):
+            raise subprocess.TimeoutExpired(cmd=["pdfinfo"], timeout=30)
+
+        monkeypatch.setattr(document, "pdf_page_count", raise_timeout)
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=1)
+        with pytest.raises(OcrDocumentError, match="could not read PDF") as excinfo:
+            ocr_document(pdf)
+        assert not isinstance(excinfo.value, UnreadableDocumentError)
+
+    def test_missing_pdfinfo_tool_stays_retryable(self, tmp_path, fake_registry, monkeypatch):
+        def raise_tool_missing(_source):
+            raise RuntimeError("pdfinfo is required; install Poppler")
+
+        monkeypatch.setattr(document, "pdf_page_count", raise_tool_missing)
+        pdf = build_pdf(tmp_path / "doc.pdf", pages=1)
+        with pytest.raises(OcrDocumentError, match="could not read PDF") as excinfo:
+            ocr_document(pdf)
+        assert not isinstance(excinfo.value, UnreadableDocumentError)
 
     def test_unsupported_image_source_raises(self, tmp_path, fake_registry):
         junk = tmp_path / "notes.txt"
